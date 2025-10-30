@@ -1,0 +1,376 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "fileSelector": "={{ $json.path }}",
+        "options": {
+          "dataPropertyName": "data"
+        }
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        384,
+        -16
+      ],
+      "id": "02125e74-56d0-4a8d-9666-d661b6f730ae",
+      "name": "Read/Write Files from Disk",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input: binary HTML at any key (e.g., data_html, data, file) or json.html/text\n// Output later: json.visibleText\n\nconst item = $input.first() || { json:{}, binary:{} };\n\n// ---- Load HTML (robust) ----\nlet html = '';\n\n// 1) Prefer any binary property that has .data\nif (item.binary && typeof item.binary === 'object') {\n  for (const [k, v] of Object.entries(item.binary)) {\n    if (v && typeof v.data === 'string' && v.data.length) {\n      html = Buffer.from(v.data, 'base64').toString('utf8');\n      break;\n    }\n  }\n}\n\n// 2) Fallbacks: json.html, json.text, json.visibleText\nif (!html && typeof item.json?.html === 'string') html = item.json.html;\nif (!html && typeof item.json?.text === 'string') html = item.json.text;\nif (!html && typeof item.json?.visibleText === 'string') html = item.json.visibleText;\n\n// 3) If still nothing, throw with helpful debug\nif (!html) {\n  const jKeys = Object.keys(item.json || {});\n  const bKeys = Object.keys(item.binary || {});\n  throw new Error(\n    'No HTML/text found on input. Expect binary (e.g., data_html/data) or json.html/text. ' +\n    `json keys: [${jKeys.join(', ')}], binary keys: [${bKeys.join(', ')}]`\n  );\n}\n\n// ---- Helpers ----\nfunction decodeEntities(str) {\n  return str.replace(/&(#(x)?([\\da-fA-F]+)|[a-zA-Z]+);/g, (m, inner, isHex, num) => {\n    if (inner[0] === '#') {\n      const code = isHex ? parseInt(num,16) : parseInt(num,10);\n      return Number.isFinite(code) ? String.fromCodePoint(code) : m;\n    }\n    const map = {nbsp:' ',amp:'&',lt:'<',gt:'>',quot:'\"',apos:\"'\",ensp:' ',emsp:' '};\n    return map[inner] ?? m;\n  });\n}\n\n// ---- Strip “invisible” stuff, keep what users see ----\nlet s = html.replace(/<!--[\\s\\S]*?-->/g, '');\ns = s.replace(/<(script|style|template|noscript|head)\\b[\\s\\S]*?<\\/\\1\\s*>/gi, '');\ns = s.replace(/<(pre|code)\\b[\\s\\S]*?<\\/\\1\\s*>/gi, '');\ns = s.replace(/<img[^>]*alt=['\"]([^'\"]+)['\"][^>]*>/gi, ' $1 ');\ns = s.replace(/<br\\s*\\/?>/gi, '\\n');\ns = s.replace(/<\\/(p|div|section|article|header|footer|address|blockquote|h[1-6])\\s*>/gi, '\\n');\ns = s.replace(/<li\\b[^>]*>/gi, '\\n- ');\ns = s.replace(/<\\/(ul|ol)\\s*>/gi, '\\n');\ns = s.replace(/<t[hd]\\b[^>]*>/gi, '\\t');\ns = s.replace(/<\\/tr\\s*>/gi, '\\n');\ns = s.replace(/<\\/table\\s*>/gi, '\\n');\ns = s.replace(/<[^>]+>/g, ' ');\n\ns = decodeEntities(s)\n  .replace(/\\r/g, '')\n  .replace(/[ \\t]+/g, ' ')\n  .replace(/[ \\t]+\\n/g, '\\n')\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .trim();\n\nreturn [{ json: { visibleText: s, length: s.length } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        -16
+      ],
+      "id": "cfce0903-c09f-4f81-8f35-988dccc7137e",
+      "name": "Code",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-20250514",
+          "mode": "list",
+          "cachedResultName": "claude-sonnet-4-20250514"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=\n\nReview this previously submitted work from a worker and answer the questions, say which ratings need to be fixed. Read the instructions and the conversation history if its there and complete the task accordingly. If the job is not a review job and the answers are not filled out/there are no explanations given or reviewer overall ratings, give the answers for the task as you see fit and the explanations. keep the responses concise. the answers or changes in order, then a small, efficient explanation. The context is this was the text from an HTML form they filled out, or a job that needs to be filled out. Do not give general answers that could be applied to any submission. Give concrete reasoning why it is good or bad while being relatively concise. If there are review questions at the end and a review explanation without data, those are for you to answer. {{ $json.visibleText }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [
+        1616,
+        -208
+      ],
+      "id": "73392894-93e0-471e-b8cd-a6d837b14dc2",
+      "name": "Message a model",
+      "retryOnFail": true,
+      "credentials": {
+        "anthropicApi": {
+          "id": "tJ7GBNxdB8R239rD",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "triggerOn": "folder",
+        "path": "/downloads",
+        "events": [
+          "add"
+        ],
+        "options": {}
+      },
+      "type": "n8n-nodes-base.localFileTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "b99d07cf-d7c9-4656-ab0f-ea6b0c4b5af3",
+      "name": "Local File Trigger"
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "content": "={{ $json.content[0].text }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1984,
+        -208
+      ],
+      "id": "49a5ed0a-09c2-496d-afb8-7cf9bda4fef9",
+      "name": "Discord",
+      "webhookId": "8aeac0d9-d651-41a8-9052-fa1359b0da88",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "JERqIyUmgF4SLdDq",
+          "name": "Discord Webhook account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "f=$(ls -t /downloads/*.htm /downloads/*.html 2>/dev/null | head -n 1);\nif [ -n \"$f\" ]; then \n  rm -f -- \"$f\" && echo \"Deleted: $f\"; \nelse \n  echo \"No HTML files found.\";\nfi\n"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        2176,
+        -192
+      ],
+      "id": "3ce9b30e-72e2-481f-976c-e0f11286c7c4",
+      "name": "Execute Command1"
+    },
+    {
+      "parameters": {
+        "content": "## Delete file",
+        "height": 352
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2096,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "60c9af18-2504-419c-afb6-ccb50fe3fdb7",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input: binary HTML at $binary.data (or data_html). Output:\n//  - json.visibleText: user-visible text with [x]/[ ] markers\n//  - json.controls: structured list of inputs (type/name/value/checked/label)\n\nconst item = $input.first() || { json:{}, binary:{} };\n\nlet html = '';\nif (item.binary?.data?.data) {\n  html = Buffer.from(item.binary.data.data, 'base64').toString('utf8');\n} else if (item.binary?.data_html?.data) {\n  html = Buffer.from(item.binary.data_html.data, 'base64').toString('utf8');\n} else if (typeof item.json?.html === 'string') {\n  html = item.json.html;\n} else {\n  throw new Error('Feed this node the ORIGINAL HTML as binary (e.g., Read Files → data).');\n}\n\n// --- utils ---\nconst decodeEntities = (str) =>\n  str.replace(/&(#(x)?([\\da-fA-F]+)|[a-zA-Z]+);/g, (m, inner, isHex, num) => {\n    if (inner[0] === '#') {\n      const code = isHex ? parseInt(num,16) : parseInt(num,10);\n      return Number.isFinite(code) ? String.fromCodePoint(code) : m;\n    }\n    const map = {nbsp:' ',amp:'&',lt:'<',gt:'>',quot:'\"',apos:\"'\",ensp:' ',emsp:' '};\n    return map[inner] ?? m;\n  });\n\nconst stripTags = (s) => decodeEntities(\n  s.replace(/<[^>]+>/g, ' ')\n    .replace(/\\r/g,'')\n    .replace(/[ \\t]+/g,' ')\n    .replace(/[ \\t]+\\n/g,'\\n')\n    .replace(/\\n{3,}/g,'\\n\\n')\n).trim();\n\nconst getInnerText = (s) => stripTags(s);\n\n// --- 1) sanitize (but keep labels/inputs) ---\nlet h = html\n  .replace(/<!--[\\s\\S]*?-->/g, '')\n  .replace(/<(script|style|template|noscript|head)\\b[\\s\\S]*?<\\/\\1\\s*>/gi, '');\n\n// --- 2) map <label for=\"id\"> text ---\nconst labelFor = {};\nh.replace(/<label\\b[^>]*for=[\"']([^\"']+)[\"'][^>]*>([\\s\\S]*?)<\\/label>/gi, (m, id, inner) => {\n  labelFor[id] = getInnerText(inner);\n  return m;\n});\n\n// --- 3) annotate inputs with [x]/[ ] + label ---\nconst controls = [];\nh = h.replace(/<input\\b[^>]*type\\s*=\\s*(?:\"(radio|checkbox)\"|'(radio|checkbox)'|(radio|checkbox))[^>]*>/gi,\n  (tag, t1, t2, t3, offset) => {\n    const type = (t1 || t2 || t3 || '').toLowerCase();\n    const attrs = {};\n    tag.replace(/\\s([a-zA-Z0-9:-]+)(?:\\s*=\\s*(\".*?\"|'.*?'|[^\\s>]+))?/g, (m, k, v) => {\n      k = k.toLowerCase();\n      if (v == null) { attrs[k] = true; }\n      else {\n        if ((v.startsWith('\"') && v.endsWith('\"')) || (v.startsWith(\"'\") && v.endsWith(\"'\"))) v = v.slice(1,-1);\n        attrs[k] = v;\n      }\n      return m;\n    });\n\n    const id = attrs.id || '';\n    const name = attrs.name || '';\n    const value = attrs.value || '';\n    const checked = ('checked' in attrs) || String(attrs['aria-checked']).toLowerCase() === 'true';\n\n    // label: prefer <label for=...>, else nearby text after the input (span/text)\n    let label = id && labelFor[id] ? labelFor[id] : '';\n    if (!label) {\n      const after = h.slice(offset + tag.length, offset + tag.length + 300);\n      const m1 = after.match(/^\\s*(?:<\\/?\\w+[^>]*>)*\\s*(?:<span[^>]*>)?([^<]{1,160})/i);\n      if (m1) label = m1[1].trim();\n      // or if input is inside a label: grab preceding text within ~200 chars\n      if (!label) {\n        const before = h.slice(Math.max(0, offset - 200), offset);\n        const m2 = before.match(/<label[^>]*>(?:[\\s\\S]*?)$/i);\n        if (m2) {\n          const m3 = after.match(/^[\\s\\S]*?<\\/label>/i);\n          const inline = (m2 ? m2[0] : '') + (m3 ? m3[0] : '');\n          const cleaned = getInnerText(inline.replace(tag, ''));\n          if (cleaned) label = cleaned;\n        }\n      }\n    }\n\n    const marker = checked ? '[x]' : '[ ]';\n    controls.push({ type, name, value, checked, label });\n    const fallback = name ? (value ? `${name}=${value}` : name) : '';\n    return `${marker} ${label || fallback}`.trim();\n  }\n);\n\n// --- 4) render to visible text ---\nlet s = h;\n// line breaks for block elements\ns = s.replace(/<br\\s*\\/?>/gi, '\\n')\n     .replace(/<\\/(p|div|section|article|header|footer|address|blockquote|h[1-6])\\s*>/gi, '\\n')\n     .replace(/<li\\b[^>]*>/gi, '\\n- ')\n     .replace(/<\\/(ul|ol)\\s*>/gi, '\\n')\n     .replace(/<t[hd]\\b[^>]*>/gi, '\\t')\n     .replace(/<\\/tr\\s*>/gi, '\\n')\n     .replace(/<\\/table\\s*>/gi, '\\n');\n// drop remaining tags and tidy\ns = stripTags(s);\n\nreturn [{\n  json: {\n    visibleText: s,\n    controls, // structured list (you can group by name below if you want)\n    selectedByName: controls.reduce((acc, c) => {\n      if (!acc[c.name || '']) acc[c.name || ''] = [];\n      if (c.checked) acc[c.name || ''].push(c.label || c.value || '');\n      return acc;\n    }, {})\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        -16
+      ],
+      "id": "f7975c35-c2e5-42fc-8a65-f98c5ecbdb87",
+      "name": "Code1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "21c034a5-d349-4a4a-b09a-14073fc268cf",
+              "leftValue": "={{ $json.visibleText }}",
+              "rightValue": "Rate And Review",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1328,
+        -32
+      ],
+      "id": "94cbd694-d6b6-4e65-b2fb-9ec66cedec7d",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-20250514",
+          "mode": "list",
+          "cachedResultName": "claude-sonnet-4-20250514"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=\n\nRead the instructions and the conversation history if its there and complete the task accordingly. Give the answers for the task as you see fit and the explanations. Keep the responses concise, the answers in order, then a small, efficient explanation. The context is this was the text from an HTML form that needs to be filled out. Do not give general answers that could be applied to any submission. Give concrete reasoning for your ratings in your explanations. \n\n{{ $('Code').item.json.visibleText }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [
+        1616,
+        16
+      ],
+      "id": "d99f5212-1e70-40a2-a0ac-008862b08b72",
+      "name": "Message a model1",
+      "retryOnFail": true,
+      "credentials": {
+        "anthropicApi": {
+          "id": "tJ7GBNxdB8R239rD",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "f=$(ls -t /downloads/*.htm /downloads/*.html 2>/dev/null | head -n 1);\nif [ -n \"$f\" ]; then \n  rm -f -- \"$f\" && echo \"Deleted: $f\"; \nelse \n  echo \"No HTML files found.\";\nfi\n"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        2240,
+        80
+      ],
+      "id": "853a28e9-dcab-40c8-95f3-631fb8c83b40",
+      "name": "Execute Command"
+    },
+    {
+      "parameters": {
+        "content": "## Is it a review?",
+        "height": 224
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1264,
+        -96
+      ],
+      "typeVersion": 1,
+      "id": "24b25965-a2b9-4a3d-882d-51d5443a5ce4",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "content": "={{ $json.content[0].text }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1952,
+        32
+      ],
+      "id": "f26ba01e-f5cb-41d6-8261-549b92738666",
+      "name": "Discord1",
+      "webhookId": "8aeac0d9-d651-41a8-9052-fa1359b0da88",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "JERqIyUmgF4SLdDq",
+          "name": "Discord Webhook account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Read/Write Files from Disk": {
+      "main": [
+        [
+          {
+            "node": "Code1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local File Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discord": {
+      "main": [
+        [
+          {
+            "node": "Execute Command1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code1": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Message a model1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model1": {
+      "main": [
+        [
+          {
+            "node": "Discord1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discord1": {
+      "main": [
+        [
+          {
+            "node": "Execute Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "600771deb236e72a5695cf91b2e4ba6dd1836dcde66a2ab6d1ed7df4f422c538"
+  }
+}

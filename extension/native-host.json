@@ -1,0 +1,9 @@
+{
+  "name": "com.scrolldetector.host",
+  "description": "Page Helper Native Host",
+  "path": "/Users/w0rker/Desktop/DSHID/native-host.js",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://oodgpadnokfbdfhjilioohpmonlidcmk/"
+  ]
+}

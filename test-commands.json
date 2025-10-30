@@ -1,0 +1,19 @@
+{
+  "picoCommands": [
+    "DELAY,2000",
+    "MOVE,162,35",
+    "CLICK",
+    "COMBO,ctrl+a",
+    "TYPE,Customer Feedback Survey 2024",
+    "DELAY,1000",
+    "MOVE,946,596",
+    "CLICK",
+    "COMBO,ctrl+a",
+    "TYPE,Sarah Johnson",
+    "DELAY,1000",
+    "MOVE,946,745",
+    "CLICK",
+    "COMBO,ctrl+a",
+    "TYPE,sarah.johnson@gmail.com"
+  ]
+}

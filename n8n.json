@@ -1,0 +1,217 @@
+{
+  "name": "Ghost Cursor Form Completion",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "c1b2a3d4-f5e6-7890-abcd-ef1234567890",
+      "name": "Workflow Trigger",
+      "type": "n8n-nodes-base.workflowTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract form structure and AI answers from parent workflow\nconst parentData = $input.first().json;\n\n// Get data from parent workflow nodes\nconst formData = $('Code1', 'main').item?.json;\nconst aiAnswers = $('Message a model', 'main').item?.json?.content?.[0]?.text || \n                 $('Message a model1', 'main').item?.json?.content?.[0]?.text;\n\nif (!formData || !aiAnswers) {\n  throw new Error('Missing form data or AI answers from parent workflow');\n}\n\n// Parse form structure from your existing form analysis\nconst formStructure = {\n  textInputs: [],\n  radioGroups: {},\n  checkboxes: [],\n  textareas: [],\n  selects: [],\n  buttons: []\n};\n\nif (formData.controls) {\n  formData.controls.forEach((control, index) => {\n    const element = {\n      ...control,\n      index: index,\n      selector: `input[name=\"${control.name}\"][value=\"${control.value}\"]`,\n      coordinates: {\n        x: 300 + (index * 50),\n        y: 200 + (index * 30)\n      }\n    };\n    \n    switch (control.type) {\n      case 'radio':\n        if (!formStructure.radioGroups[control.name]) {\n          formStructure.radioGroups[control.name] = [];\n        }\n        formStructure.radioGroups[control.name].push(element);\n        break;\n      case 'checkbox':\n        formStructure.checkboxes.push(element);\n        break;\n      case 'text':\n      case 'email':\n      case 'password':\n        formStructure.textInputs.push(element);\n        break;\n      case 'textarea':\n        formStructure.textareas.push(element);\n        break;\n      case 'select':\n        formStructure.selects.push(element);\n        break;\n      case 'submit':\n      case 'button':\n        formStructure.buttons.push(element);\n        break;\n    }\n  });\n}\n\nreturn [{\n  json: {\n    formStructure: formStructure,\n    aiAnswers: aiAnswers,\n    originalText: formData.visibleText,\n    selectedByName: formData.selectedByName || {},\n    readyForMapping: true,\n    debug: {\n      foundControls: formData.controls?.length || 0,\n      radioGroups: Object.keys(formStructure.radioGroups).length,\n      checkboxes: formStructure.checkboxes.length\n    }\n  }\n}];"
+      },
+      "id": "c2b3a4d5-f6e7-8901-bcde-f12345678901",
+      "name": "Prepare Form Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-20250514",
+          "mode": "list",
+          "cachedResultName": "claude-sonnet-4-20250514"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You are a form completion expert. Given this form structure and AI answers, generate specific actions to fill the form.\n\nForm Structure: {{ JSON.stringify($json.formStructure, null, 2) }}\n\nAI Answers: {{ $json.aiAnswers }}\n\nGenerate a JSON response with this exact format:\n{\n  \"actions\": [\n    {\"type\": \"click\", \"target\": \"radio_group_name.option_value\", \"x\": 300, \"y\": 200, \"description\": \"Select rating option\"},\n    {\"type\": \"click\", \"target\": \"checkbox_name\", \"x\": 350, \"y\": 250, \"description\": \"Check category\"},\n    {\"type\": \"click\", \"target\": \"text_input_name\", \"x\": 400, \"y\": 300, \"description\": \"Focus text field\"},\n    {\"type\": \"type\", \"text\": \"text to type\", \"description\": \"Enter comment\"},\n    {\"type\": \"delay\", \"duration\": 1000, \"description\": \"Human pause\"},\n    {\"type\": \"click\", \"target\": \"submit_button\", \"x\": 450, \"y\": 500, \"description\": \"Submit form\"}\n  ]\n}\n\nBe specific about which radio options to select, which checkboxes to check, and what text to enter based on the AI answers. Use reasonable coordinate estimates."
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c3b4a5d6-f7e8-9012-cdef-123456789012",
+      "name": "Form Mapping AI",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [680, 300],
+      "credentials": {
+        "anthropicApi": {
+          "id": "tJ7GBNxdB8R239rD",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Convert AI form mapping to Ghost Cursor actions\nconst formMapping = $('Form Mapping AI').item.json.content[0].text;\nconst formData = $('Prepare Form Data').item.json;\n\nlet mappingData;\ntry {\n  const jsonMatch = formMapping.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    mappingData = JSON.parse(jsonMatch[0]);\n  } else {\n    throw new Error('No JSON found in AI response');\n  }\n} catch (error) {\n  console.error('Failed to parse form mapping:', error);\n  console.log('AI Response:', formMapping);\n  \n  // Fallback: create basic actions\n  const actions = [];\n  Object.keys(formData.formStructure.radioGroups).forEach((groupName, index) => {\n    const group = formData.formStructure.radioGroups[groupName];\n    if (group.length > 0) {\n      actions.push({\n        type: 'click',\n        target: `${groupName}.${group[0].value}`,\n        x: 300 + (index * 50),\n        y: 200 + (index * 40),\n        description: `Select ${groupName} option`\n      });\n    }\n  });\n  \n  actions.push(\n    {type: 'delay', duration: 1000, description: 'Thinking pause'},\n    {type: 'click', target: 'submit', x: 400, y: 500, description: 'Submit form'}\n  );\n  \n  mappingData = { actions };\n}\n\nif (!mappingData.actions || !Array.isArray(mappingData.actions)) {\n  throw new Error('Invalid action format from AI mapping');\n}\n\n// Enhance actions with Ghost Cursor humanization\nconst completionActions = mappingData.actions.map((action, index) => {\n  const baseAction = {\n    ...action,\n    phase: 'form_completion',\n    index: index\n  };\n  \n  if (action.type === 'click') {\n    return {\n      ...baseAction,\n      curve: 20 + Math.random() * 15,\n      jitter: 0.8 + Math.random() * 0.4,\n      overshoot: Math.random() > 0.7,\n      x: action.x + (Math.random() - 0.5) * 6,\n      y: action.y + (Math.random() - 0.5) * 6\n    };\n  } else if (action.type === 'type') {\n    return {\n      ...baseAction,\n      typingSpeed: 80 + Math.random() * 40,\n      typoChance: 0.02,\n      text: action.text || action.value || ''\n    };\n  } else if (action.type === 'delay') {\n    return {\n      ...baseAction,\n      duration: (action.duration || 1000) + (Math.random() - 0.5) * 500\n    };\n  }\n  \n  return baseAction;\n});\n\nreturn [{\n  json: {\n    completionActions: completionActions,\n    rawMapping: formMapping,\n    actionCount: completionActions.length,\n    readyForTesting: true,\n    summary: `Generated ${completionActions.length} form completion actions`\n  }\n}];"
+      },
+      "id": "c4b5a6d7-f8e9-0123-def0-234567890123",
+      "name": "Generate Completion Actions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:3001/test-offline",
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ actions: $json.completionActions, mode: 'offline_test' }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "c5b6a7d8-f9e0-1234-ef01-345678901234",
+      "name": "Test Offline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c6b7a8d9-f0e1-2345-f012-456789012345",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c6b7a8d9-f0e1-2345-f012-456789012345",
+      "name": "Offline Test Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:3001/execute-form-completion",
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ actions: $('Generate Completion Actions').item.json.completionActions, mode: 'live' }) }}",
+        "options": {
+          "timeout": 45000
+        }
+      },
+      "id": "c7b8a9d0-f1e2-3456-0123-567890123456",
+      "name": "Execute Live",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle test failure\nconst testResults = $input.first().json;\nconst completionActions = $('Generate Completion Actions').item.json.completionActions;\n\nreturn [{\n  json: {\n    success: false,\n    error: 'Offline form completion test failed',\n    testResults: testResults,\n    failedActions: completionActions,\n    needsManualReview: true,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "c8b9a0d1-f2e3-4567-1234-678901234567",
+      "name": "Handle Test Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 400]
+    }
+  ],
+  "connections": {
+    "Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Form Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Form Data": {
+      "main": [
+        [
+          {
+            "node": "Form Mapping AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Form Mapping AI": {
+      "main": [
+        [
+          {
+            "node": "Generate Completion Actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Completion Actions": {
+      "main": [
+        [
+          {
+            "node": "Test Offline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Offline": {
+      "main": [
+        [
+          {
+            "node": "Offline Test Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Offline Test Passed?": {
+      "main": [
+        [
+          {
+            "node": "Execute Live",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Test Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}

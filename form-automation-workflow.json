@@ -1,0 +1,184 @@
+{
+  "name": "Form Automation Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "form-automation",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [80, 300],
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "webhookId": "form-automation-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process form fields detected by Chrome extension\nconst fields = $json.body?.fields || $json.fields || [];\nconst url = $json.body?.url || $json.url || '';\nconst timestamp = $json.body?.timestamp || $json.timestamp || Date.now();\n\nconsole.log('Debug - Received data:', JSON.stringify($json, null, 2));\nconsole.log('Debug - Fields found:', fields.length);\n\nif (!fields || fields.length === 0) {\n  throw new Error(`No form fields detected. Received data keys: ${Object.keys($json).join(', ')}. Full data: ${JSON.stringify($json)}`);\n}\n\nconsole.log(`Processing ${fields.length} form fields from ${url}`);\n\n// The extension already provides coordinates, so we just need to format the data\nconst processedFields = fields.map((field, index) => {\n  // Determine action type based on field type\n  let action = 'type_text';\n  if (field.type === 'checkbox' || field.type === 'radio') {\n    action = 'click';\n  } else if (field.type === 'select') {\n    action = 'click_select';\n  }\n  \n  return {\n    ...field,\n    action: action,\n    fieldIndex: index + 1,\n    // Extension already provides coordinates\n    coordinates: {\n      x: field.x,\n      y: field.y,\n      width: field.width,\n      height: field.height\n    }\n  };\n});\n\nreturn [{ \n  json: { \n    fields: processedFields,\n    fieldCount: processedFields.length,\n    sourceUrl: url,\n    detectedAt: timestamp,\n    source: 'chrome_extension'\n  } \n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 300],
+      "id": "extract-fields",
+      "name": "Process Extension Data"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-20250514",
+          "mode": "list",
+          "cachedResultName": "claude-sonnet-4-20250514"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Generate realistic form data for the following form fields. Return only a JSON object with field names as keys and appropriate values. Make the data believable and varied.\n\nForm fields:\n{{ JSON.stringify($json.fields, null, 2) }}\n\nFor each field:\n- text/email fields: generate realistic values\n- textarea: write natural sentences\n- select: pick from available options\n- tel: format as phone numbers\n- url: provide valid URLs\n- date: use realistic dates\n\nReturn only the JSON object, no explanation."
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [520, 300],
+      "id": "generate-data",
+      "name": "Generate Form Data",
+      "credentials": {
+        "anthropicApi": {
+          "id": "tJ7GBNxdB8R239rD",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse AI response and combine with field info\nconst fields = $('Process Extension Data').item.json.fields;\nconst aiResponse = $json.content[0].text;\n\n// Try to parse JSON from AI response\nlet formData;\ntry {\n  // Extract JSON from response (in case AI adds extra text)\n  const jsonMatch = aiResponse.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    formData = JSON.parse(jsonMatch[0]);\n  } else {\n    throw new Error('No JSON found in AI response');\n  }\n} catch (error) {\n  // Fallback: generate basic data\n  console.log('Failed to parse AI response, using fallback data');\n  formData = {};\n  fields.forEach(field => {\n    switch (field.type) {\n      case 'email':\n        formData[field.name] = 'john.doe@example.com';\n        break;\n      case 'tel':\n        formData[field.name] = '(555) 123-4567';\n        break;\n      case 'url':\n        formData[field.name] = 'https://example.com';\n        break;\n      case 'textarea':\n        formData[field.name] = 'This is a sample message for the form.';\n        break;\n      case 'select':\n        if (field.options && field.options.length > 0) {\n          formData[field.name] = field.options[0].value;\n        }\n        break;\n      default:\n        formData[field.name] = field.placeholder || 'Sample data';\n    }\n  });\n}\n\n// Combine field info with generated data\nconst automation = fields.map(field => ({\n  ...field,\n  value: formData[field.selector] || formData[field.name] || formData[field.id] || '',\n  action: field.type === 'select' ? 'click_select' : 'type_text'\n}));\n\nreturn [{ json: { automation, formData } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [740, 300],
+      "id": "prepare-automation",
+      "name": "Prepare Automation Data"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate Pi Pico commands directly from extension data\nconst automation = $json.automation;\n\nif (!automation || automation.length === 0) {\n  throw new Error('No automation data provided');\n}\n\n// Generate commands for Pi Pico\nconst commands = [];\n\n// Add initial delay\ncommands.push({\n  type: 'delay',\n  duration: 2000,\n  description: 'Initial delay before starting'\n});\n\nautomation.forEach((field, index) => {\n  // Move to element using coordinates from extension\n  commands.push({\n    type: 'move',\n    x: field.x || field.coordinates?.x,\n    y: field.y || field.coordinates?.y,\n    description: `Move to ${field.placeholder || field.name}`\n  });\n  \n  // Click element\n  commands.push({\n    type: 'click',\n    description: `Click ${field.placeholder || field.name}`\n  });\n  \n  // Handle different input types\n  if (field.action === 'type_text' && field.value) {\n    // Clear field first\n    commands.push({\n      type: 'key_combo',\n      keys: ['ctrl', 'a'],\n      description: `Select all in ${field.placeholder || field.name}`\n    });\n    \n    // Type the value\n    commands.push({\n      type: 'type',\n      text: field.value,\n      description: `Type '${field.value}' in ${field.placeholder || field.name}`\n    });\n  } else if (field.action === 'click_select' && field.value) {\n    // For select dropdowns\n    commands.push({\n      type: 'type',\n      text: field.value,\n      description: `Select '${field.value}' in ${field.placeholder || field.name}`\n    });\n  }\n  \n  // Small delay between fields\n  commands.push({\n    type: 'delay',\n    duration: 500 + Math.random() * 1000,\n    description: `Delay after ${field.placeholder || field.name}`\n  });\n});\n\n// Add submit (removed Enter to avoid macOS shortcuts)\ncommands.push({\n  type: 'key',\n  key: 'Tab',\n  description: 'Navigate to submit'\n});\n\ncommands.push({\n  type: 'delay',\n  duration: 2000,\n  description: 'Final delay'\n});\n\nreturn [{ json: { commands, totalCommands: commands.length, automation } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 300],
+      "id": "generate-commands",
+      "name": "Generate Pi Pico Commands"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Send commands to Pi Pico via HTTP\nconst commands = $json.commands;\n\n// Convert commands to Pi Pico format\nconst picoCommands = commands.map(cmd => {\n  switch (cmd.type) {\n    case 'move':\n      return `MOVE,${cmd.x},${cmd.y}`;\n    case 'click':\n      return 'CLICK';\n    case 'type':\n      return `TYPE,${cmd.text}`;\n    case 'key':\n      return `KEY,${cmd.key}`;\n    case 'key_combo':\n      return `COMBO,${cmd.keys.join('+')}`;\n    case 'delay':\n      return `DELAY,${cmd.duration}`;\n    default:\n      return `# ${cmd.description || 'Unknown command'}`;\n  }\n});\n\n// Send to reading behavior script's automation endpoint\nconst automationData = {\n  type: 'form_automation',\n  commands: picoCommands,\n  timestamp: Date.now()\n};\n\nreturn [{ json: { automationData, picoCommands, status: 'ready_to_send' } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1180, 300],
+      "id": "format-pico-commands",
+      "name": "Format Pi Pico Commands"
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:3004/automation",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ picoCommands: $json.picoCommands }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1400, 300],
+      "id": "send-to-pico",
+      "name": "Send to Pi Pico"
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Form Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Form Fields": {
+      "main": [
+        [
+          {
+            "node": "Generate Form Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Form Data": {
+      "main": [
+        [
+          {
+            "node": "Prepare Automation Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Automation Data": {
+      "main": [
+        [
+          {
+            "node": "Generate Pi Pico Commands",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Pi Pico Commands": {
+      "main": [
+        [
+          {
+            "node": "Format Pi Pico Commands",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Pi Pico Commands": {
+      "main": [
+        [
+          {
+            "node": "Send to Pi Pico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "600771deb236e72a5695cf91b2e4ba6dd1836dcde66a2ab6d1ed7df4f422c538"
+  }
+}
