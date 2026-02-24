@@ -89,54 +89,16 @@ function detectFormFields() {
       const viewportX = Math.round(rect.left + rect.width/2);
       const viewportY = Math.round(rect.top + rect.height/2);
       
-      // Skip fields that are outside reasonable automation bounds
-      if (viewportX < 0 || viewportX > 1200 || viewportY < 0 || viewportY > 900) {
-        return; // Skip this field - coordinates are too extreme
-      }
-      
-      // Get browser window offset with Mac DPI/scaling handling
-      let windowX = window.screenX || window.screenLeft || 0;
-      let windowY = window.screenY || window.screenTop || 0;
-      
-      // Detect Mac Retina/scaling issues
-      const devicePixelRatio = window.devicePixelRatio || 1;
-      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-      
-      console.log(`🖥️  Display info - DPR: ${devicePixelRatio}, Platform: ${navigator.platform}`);
-      console.log(`📐 Screen size: ${screen.width}x${screen.height}, Window: ${window.innerWidth}x${window.innerHeight}`);
-      
-      // Mac-specific coordinate correction
-      if (isMac && devicePixelRatio > 1) {
-        // On Retina Macs, sometimes coordinates need scaling adjustment
-        console.log(`🍎 Mac Retina detected - original coords: (${windowX}, ${windowY})`);
-        
-        // If coordinates seem scaled incorrectly, apply correction
-        if (Math.abs(windowX) > screen.width || Math.abs(windowY) > screen.height) {
-          windowX = Math.round(windowX / devicePixelRatio);
-          windowY = Math.round(windowY / devicePixelRatio);
-          console.log(`🔧 Applied DPI correction: (${windowX}, ${windowY})`);
-        }
-      }
-      
-      // Validate window offsets - if they're still extreme, use fallbacks
-      if (windowX < -1000 || windowX > 4000 || windowY < -1000 || windowY > 3000) {
-        console.warn(`⚠️  Invalid coords after correction: (${windowX}, ${windowY}), using fallback`);
-        windowX = 100;
-        windowY = 100;
-      }
-      
-      // Add browser chrome offset (approximately 120px for address bar/tabs)
-      const chromeOffset = 120;
-      
+      const windowX = window.screenX || window.screenLeft || 0;
+      const windowY = window.screenY || window.screenTop || 0;
+
+      // outerHeight - innerHeight gives the exact browser chrome height
+      // (tabs + address bar + bookmarks bar) regardless of zoom or OS scaling
+      const chromeOffset = window.outerHeight - window.innerHeight;
+
       const absoluteX = windowX + viewportX;
       const absoluteY = windowY + viewportY + chromeOffset;
       
-      console.log(`🔍 Field debug - ${placeholder || name}:`);
-      console.log(`   Raw rect:`, rect);
-      console.log(`   Viewport coords: (${viewportX}, ${viewportY})`);
-      console.log(`   Window offset: (${windowX}, ${windowY})`);
-      console.log(`   Absolute coords: (${absoluteX}, ${absoluteY})`);
-      console.log(`   Window size: ${window.innerWidth}x${window.innerHeight}`);
       
       fields.push({
         type: fieldType,
@@ -166,6 +128,135 @@ function detectFormFields() {
     }).catch(() => {});
   }
 }
+
+// Poll for coord requests from the server. When automation is about to click
+// a field, it posts a request here. We scroll the element into view and
+// return fresh coordinates right at that moment.
+function pollForCoordRequests() {
+  fetch('http://localhost:3004/coord-request')
+    .then(r => r.json())
+    .then(data => {
+      if (!data || !data.selector) return;
+
+      const el = document.querySelector(data.selector);
+      if (!el) {
+        fetch('http://localhost:3004/coord-response', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requestId: data.requestId, found: false })
+        }).catch(() => {});
+        return;
+      }
+
+      // For checkboxes and radios the input itself is tiny (~18px).
+      // Prefer clicking an associated <label> — it's always much larger and
+      // works on any site without any HTML changes needed.
+      // Priority: label[for=id] > parent <label> > the input itself.
+      let clickTarget = el;
+      if (el.type === 'checkbox' || el.type === 'radio') {
+        const labelFor = el.id
+          ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]')
+          : null;
+        const parentLabel = el.closest('label');
+        clickTarget = labelFor || parentLabel || el;
+      }
+
+      // Scroll the click target into view, then re-measure once scroll settles
+      clickTarget.scrollIntoView({ behavior: 'instant', block: 'center' });
+      setTimeout(() => {
+        const rect = clickTarget.getBoundingClientRect();
+        const windowX = window.screenX || window.screenLeft || 0;
+        const windowY = window.screenY || window.screenTop || 0;
+        const chromeOffset = window.outerHeight - window.innerHeight;
+        fetch('http://localhost:3004/coord-response', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            requestId: data.requestId,
+            selector: data.selector,
+            // Click target centre — may be a label rather than the input itself
+            x: windowX + Math.round(rect.left + rect.width / 2),
+            y: windowY + Math.round(rect.top + rect.height / 2) + chromeOffset,
+            // Cursor's actual position at this exact moment
+            cursorX: liveCursorX,
+            cursorY: liveCursorY,
+            // Full DOM state from the actual form element (el), not the label
+            value:     el.value   !== undefined ? el.value   : '',
+            checked:   el.checked !== undefined ? el.checked : null,
+            focused:   document.activeElement === el,
+            tagName:   el.tagName.toLowerCase(),
+            inputType: el.type || el.tagName.toLowerCase(),
+            found: true
+          })
+        }).catch(() => {});
+      }, 150);
+    })
+    .catch(() => {});
+}
+
+// Track the real cursor position locally on every mousemove (unthrottled).
+// This is what we include in coord-responses so the server gets both the
+// target element position AND the cursor's actual position in the same message,
+// eliminating the race condition where currentPosition on the server is stale.
+let liveCursorX = 0;
+let liveCursorY = 0;
+
+// Track which element the cursor is currently over.
+// The browser fires mouseover for Pico-driven moves too, so this is always
+// accurate — the server can use it to verify the cursor landed on the right element.
+let hoveredId   = '';
+let hoveredName = '';
+window.addEventListener('mouseover', (e) => {
+  hoveredId   = e.target.id                   || '';
+  hoveredName = e.target.getAttribute('name') || '';
+  // Use a separate endpoint so this NEVER touches currentPosition on the server.
+  // If we piggybacked on /cursor-position, a stale liveCursorX/Y=0 would corrupt
+  // the server's position estimate and break subsequent moves.
+  fetch('http://localhost:3004/cursor-hover', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hoveredId, hoveredName })
+  }).catch(() => {});
+}, { passive: true });
+
+// Report real cursor position to the server on mousemove.
+// The browser fires these for Pico-driven movements too, so
+// currentPosition on the server stays accurate without calibration.
+let lastCursorReport = 0;
+window.addEventListener('mousemove', (e) => {
+  const windowX = window.screenX || window.screenLeft || 0;
+  const windowY = window.screenY || window.screenTop || 0;
+  const chromeOffset = window.outerHeight - window.innerHeight;
+
+  // Always update the local snapshot — no throttle on this
+  liveCursorX = windowX + Math.round(e.clientX);
+  liveCursorY = windowY + Math.round(e.clientY) + chromeOffset;
+
+  // Throttle the network report to ~12/sec to avoid flooding the server
+  const now = Date.now();
+  if (now - lastCursorReport < 80) return;
+  lastCursorReport = now;
+
+  fetch('http://localhost:3004/cursor-position', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ x: liveCursorX, y: liveCursorY, hoveredId, hoveredName })
+  }).catch(() => {});
+}, { passive: true });
+
+// Also update liveCursorX/Y on click events. JavaScript has no API to read
+// the cursor position without a mouse event — if the user clicks a button
+// without having moved the mouse first, liveCursorX/Y would be stuck at 0.
+// Capturing click ensures it's always accurate when automation starts.
+window.addEventListener('click', (e) => {
+  const windowX = window.screenX || window.screenLeft || 0;
+  const windowY = window.screenY || window.screenTop || 0;
+  const chromeOffset = window.outerHeight - window.innerHeight;
+  liveCursorX = windowX + Math.round(e.clientX);
+  liveCursorY = windowY + Math.round(e.clientY) + chromeOffset;
+}, { passive: true });
+
+setInterval(pollForCoordRequests, 300);
 
 window.addEventListener('scroll', checkScrollPosition, { passive: true });
 window.addEventListener('load', () => setTimeout(detectFormFields, 1000), { passive: true });

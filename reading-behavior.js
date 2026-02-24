@@ -1,6 +1,7 @@
 const { SerialPort } = require('serialport');
 const { ReadlineParser } = require('@serialport/parser-readline');
 const http = require('http');
+// ghost-cursor kept for potential future use; movement now uses humanPath()
 
 class ReadingBehaviorSimulator {
     constructor(portPath) {
@@ -13,6 +14,7 @@ class ReadingBehaviorSimulator {
         this.commandQueue = [];
         this.isProcessing = false;
         this.currentPosition = { x: 400, y: 300 };
+        this.currentHovered = { id: '', name: '' };
         this.emergencyStop = false;
         this.isReading = false;
         this.isScrollingBack = false;
@@ -27,6 +29,8 @@ class ReadingBehaviorSimulator {
         this.isAtPageBottom = false;
         this.isAutomating = false;
         this.detectedFields = null;
+        this.pendingCoordRequest = null;
+        this.coordResolvers = new Map();
         
         process.on('SIGINT', () => {
             console.log('\n🛑 STOPPING READING SESSION!');
@@ -477,10 +481,114 @@ class ReadingBehaviorSimulator {
         this.isScrollingBack = false;
     }
     
+    // Move to absolute screen coordinates.
+    // Extension gives us exact target + cursor coords. Step linearly toward
+    // the target in small increments to stay below OS pointer acceleration.
+    async moveToAbs(targetX, targetY, startPos = null) {
+        let from;
+        if (startPos !== null && typeof startPos.x === 'number' && typeof startPos.y === 'number') {
+            from = { x: startPos.x, y: startPos.y };
+        } else {
+            await new Promise(r => setTimeout(r, 200));
+            from = { ...this.currentPosition };
+        }
+
+        const dx = targetX - from.x;
+        const dy = targetY - from.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        console.log(`🖱️  move: (${Math.round(from.x)},${Math.round(from.y)}) → (${targetX},${targetY})  dist=${Math.round(dist)}px`);
+
+        if (dist < 3) {
+            this.currentPosition = { x: targetX, y: targetY };
+            return;
+        }
+
+        const STEP = 15; // px per step — no pointer acceleration, go fast
+        const steps = Math.ceil(dist / STEP);
+        let sentX = 0, sentY = 0;
+
+        for (let i = 1; i <= steps; i++) {
+            if (this.emergencyStop) break;
+            const wantX = Math.round(dx * i / steps);
+            const wantY = Math.round(dy * i / steps);
+            let sdx = wantX - sentX;
+            let sdy = wantY - sentY;
+            // Occasional ±1px jitter so the path isn't a perfectly straight line
+            if (Math.random() < 0.15) sdx += Math.random() < 0.5 ? -1 : 1;
+            if (sdx !== 0 || sdy !== 0) {
+                this.port.write(`MOVE,${sdx},${sdy}\r\n`);
+                sentX = wantX;
+                sentY = wantY;
+            }
+            await new Promise(r => setTimeout(r, 8 + Math.round(Math.random() * 3)));
+        }
+
+        // Brief settle for browser mousemove events
+        await new Promise(r => setTimeout(r, 80));
+
+        const errX = targetX - this.currentPosition.x;
+        const errY = targetY - this.currentPosition.y;
+        const errDist = Math.sqrt(errX * errX + errY * errY);
+        if (errDist > 5) {
+            console.log(`   ⚠️  landed at (${Math.round(this.currentPosition.x)},${Math.round(this.currentPosition.y)}) — correcting ${errDist.toFixed(1)}px`);
+            const csteps = Math.max(1, Math.ceil(errDist / 2));
+            for (let s = 1; s <= csteps; s++) {
+                if (this.emergencyStop) break;
+                const rdx = Math.round(errX * s / csteps) - Math.round(errX * (s - 1) / csteps);
+                const rdy = Math.round(errY * s / csteps) - Math.round(errY * (s - 1) / csteps);
+                if (rdx !== 0 || rdy !== 0) {
+                    this.port.write(`MOVE,${rdx},${rdy}\r\n`);
+                    await new Promise(r => setTimeout(r, 25));
+                }
+            }
+        } else {
+            console.log(`   ✅ within ${errDist.toFixed(1)}px`);
+        }
+
+        this.currentPosition = { x: targetX, y: targetY };
+    }
+
+    isHoveringSelector(selector) {
+        const { id, name } = this.currentHovered;
+        if (selector.startsWith('#')) return id === selector.slice(1);
+        const m = selector.match(/\[name="([^"]+)"\]/);
+        if (m) return name === m[1];
+        return false;
+    }
+
+    waitForHover(selector, timeout = 500) {
+        return new Promise(resolve => {
+            if (this.isHoveringSelector(selector)) { resolve(true); return; }
+            const deadline = Date.now() + timeout;
+            const tick = setInterval(() => {
+                if (this.isHoveringSelector(selector)) { clearInterval(tick); resolve(true); }
+                else if (Date.now() >= deadline)        { clearInterval(tick); resolve(false); }
+            }, 20);
+        });
+    }
+
+    // Ask content.js for the current screen coordinates of an element.
+    // content.js polls /coord-request, scrolls the element into view,
+    // and posts back to /coord-response with fresh coords.
+    getLiveCoords(selector) {
+        return new Promise((resolve, reject) => {
+            const requestId = Date.now().toString();
+            this.pendingCoordRequest = { requestId, selector };
+            this.coordResolvers.set(requestId, resolve);
+            setTimeout(() => {
+                if (this.coordResolvers.has(requestId)) {
+                    this.coordResolvers.delete(requestId);
+                    this.pendingCoordRequest = null;
+                    reject(new Error(`Coord request timed out for: ${selector}`));
+                }
+            }, 5000);
+        });
+    }
+
     setupExtensionServer() {
         this.extensionServer = http.createServer((req, res) => {
             res.setHeader('Access-Control-Allow-Origin', '*');
-            res.setHeader('Access-Control-Allow-Methods', 'POST');
+            res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
             res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
             
             if (req.method === 'OPTIONS') {
@@ -515,6 +623,86 @@ class ReadingBehaviorSimulator {
                         res.end('Invalid JSON');
                     }
                 });
+            } else if (req.method === 'POST' && req.url === '/test-move') {
+                // Delayed test so you can run curl then switch to the browser.
+                // Body: { "delay": 4000, "moves": [[x1,y1],[x2,y2],...] }
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', async () => {
+                    let opts = {};
+                    try { opts = JSON.parse(body); } catch (_) {}
+                    const delay = opts.delay ?? 4000;
+                    const moves = opts.moves ?? [];
+                    // If the page passed the cursor position from the click event,
+                    // use it for the first move so we start from the right place.
+                    const clickCursor = (typeof opts.cursorX === 'number' && typeof opts.cursorY === 'number')
+                        ? { x: opts.cursorX, y: opts.cursorY } : null;
+                    if (clickCursor) {
+                        this.currentPosition = { ...clickCursor };
+                        console.log(`📍 Cursor at (${clickCursor.x}, ${clickCursor.y}) from click event`);
+                    }
+                    res.writeHead(200);
+                    res.end(`OK — moving in ${delay}ms`);
+                    console.log(`🖱️  Test move in ${delay}ms...`);
+                    await new Promise(r => setTimeout(r, delay));
+                    let startPos = clickCursor;
+                    for (const [x, y] of moves) {
+                        console.log(`   → moveToAbs(${x}, ${y})`);
+                        await this.moveToAbs(x, y, startPos);
+                        startPos = null; // only use provided pos for first move
+                        await new Promise(r => setTimeout(r, 300 + Math.random() * 200));
+                    }
+                    console.log('✅ Test move done');
+                });
+            } else if (req.method === 'POST' && req.url === '/cursor-position') {
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', () => {
+                    try {
+                        const data = JSON.parse(body);
+                        if (typeof data.x === 'number') {
+                            this.currentPosition = { x: data.x, y: data.y };
+                            this.currentHovered = { id: data.hoveredId || '', name: data.hoveredName || '' };
+                        }
+                    } catch (_) {}
+                    res.writeHead(200);
+                    res.end('OK');
+                });
+            } else if (req.method === 'POST' && req.url === '/cursor-hover') {
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', () => {
+                    try {
+                        const data = JSON.parse(body);
+                        this.currentHovered = { id: data.hoveredId || '', name: data.hoveredName || '' };
+                    } catch (_) {}
+                    res.writeHead(200);
+                    res.end('OK');
+                });
+            } else if (req.method === 'GET' && req.url === '/coord-request') {
+                // content.js polls this to see if there's a pending coord request
+                res.setHeader('Content-Type', 'application/json');
+                res.writeHead(200);
+                res.end(JSON.stringify(this.pendingCoordRequest || {}));
+            } else if (req.method === 'POST' && req.url === '/coord-response') {
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', () => {
+                    try {
+                        const data = JSON.parse(body);
+                        const resolve = this.coordResolvers.get(data.requestId);
+                        if (resolve) {
+                            this.coordResolvers.delete(data.requestId);
+                            this.pendingCoordRequest = null;
+                            resolve(data);
+                        }
+                        res.writeHead(200);
+                        res.end('OK');
+                    } catch (e) {
+                        res.writeHead(400);
+                        res.end('Invalid JSON');
+                    }
+                });
             } else if (req.method === 'POST' && req.url === '/form-fields') {
                 let body = '';
                 req.on('data', chunk => body += chunk);
@@ -529,14 +717,38 @@ class ReadingBehaviorSimulator {
                         res.end('Invalid JSON');
                     }
                 });
+            } else if (req.method === 'GET' && req.url === '/status') {
+                // Diagnostic endpoint — curl http://localhost:3004/status
+                res.setHeader('Content-Type', 'application/json');
+                res.writeHead(200);
+                res.end(JSON.stringify({
+                    currentPosition: this.currentPosition,
+                    isReading: this.isReading,
+                    isAutomating: this.isAutomating,
+                    detectedFields: this.detectedFields
+                        ? { url: this.detectedFields.url, fieldCount: this.detectedFields.fields.length,
+                            fields: this.detectedFields.fields.map(f => ({ selector: f.selector, x: f.x, y: f.y, type: f.type })) }
+                        : null
+                }, null, 2));
+            } else if (req.method === 'GET' && req.url === '/test-form') {
+                const fs = require('fs');
+                const path = require('path');
+                const formPath = path.join(__dirname, 'test-form.html');
+                fs.readFile(formPath, 'utf8', (err, html) => {
+                    if (err) { res.writeHead(404); res.end('test-form.html not found'); return; }
+                    res.setHeader('Content-Type', 'text/html');
+                    res.writeHead(200);
+                    res.end(html);
+                });
             } else {
                 res.writeHead(404);
                 res.end();
             }
         });
-        
+
         this.extensionServer.listen(3004, 'localhost', () => {
             console.log('🌐 Extension server listening on port 3004');
+            console.log('📋 Test form: http://localhost:3004/test-form');
         });
     }
     
@@ -572,8 +784,15 @@ class ReadingBehaviorSimulator {
         }
         
         this.isAutomating = true;
-        
-        console.log('🔍 Received automation data:', JSON.stringify(data, null, 2));
+
+        // If the page provided the cursor position from the click event that
+        // triggered automation, use it immediately — more reliable than waiting
+        // for a mousemove update which may not fire if the cursor was stationary.
+        if (typeof data.cursorX === 'number' && typeof data.cursorY === 'number') {
+            this.currentPosition = { x: data.cursorX, y: data.cursorY };
+            console.log(`📍 Cursor at (${data.cursorX}, ${data.cursorY}) from click event`);
+        }
+
         console.log(`🤖 Received ${commands.length} automation commands`);
         
         for (let i = 0; i < commands.length; i++) {
@@ -602,6 +821,96 @@ class ReadingBehaviorSimulator {
                 const delayMs = parseInt(command.split(',')[1]);
                 console.log(`   ⏳ Local delay: ${delayMs}ms`);
                 await new Promise(resolve => setTimeout(resolve, delayMs));
+
+            // FILL_FIELD,selector,text — live coord lookup + move + click + type
+            } else if (command.startsWith('FILL_FIELD,')) {
+                const parts = command.split(',');
+                const selector = parts[1];
+                const text = parts.slice(2).join(',');
+                console.log(`📝 FILL_FIELD: "${selector}" → "${text}"`);
+                try {
+                    // 1. Get live coords + current DOM state
+                    const coords = await this.getLiveCoords(selector);
+                    if (!coords.found) throw new Error('Element not found');
+                    const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
+
+                    // 2. Move and click
+                    await this.moveToAbs(coords.x, coords.y, cursorStart);
+                    await this.sendCommand('CLICK');
+                    await new Promise(r => setTimeout(r, 200));
+
+                    // 3. Verify focus via DOM (document.activeElement === el)
+                    //    Retry once with fresh coords if click missed
+                    try {
+                        const afterClick = await this.getLiveCoords(selector);
+                        if (afterClick.found && !afterClick.focused) {
+                            console.log(`   ⚠️  not focused after click — re-centering and retrying`);
+                            const cs = (typeof afterClick.cursorX === 'number')
+                                ? { x: afterClick.cursorX, y: afterClick.cursorY } : null;
+                            await this.moveToAbs(afterClick.x, afterClick.y, cs);
+                            await this.sendCommand('CLICK');
+                            await new Promise(r => setTimeout(r, 150));
+                        } else if (afterClick.focused) {
+                            console.log(`   ✅ field focused`);
+                        }
+                    } catch (_) {
+                        console.log(`   ⚠️  focus check timed out — continuing`);
+                    }
+
+                    // 4. Type text
+                    for (const char of text) {
+                        await this.sendCommand(`TYPE,${char}`);
+                        await new Promise(resolve => setTimeout(resolve, 60 + Math.random() * 40));
+                    }
+
+                    // 5. Verify value via DOM (best-effort, non-blocking)
+                    try {
+                        const afterType = await this.getLiveCoords(selector);
+                        if (afterType.found) {
+                            console.log(`   ${afterType.value ? '✅' : '⚠️ '} value: "${afterType.value}"`);
+                        }
+                    } catch (_) {}
+                } catch (err) {
+                    console.error(`   ❌ FILL_FIELD failed: ${err.message}`);
+                }
+
+            // CLICK_SELECTOR,selector — live coord lookup + move + click
+            } else if (command.startsWith('CLICK_SELECTOR,')) {
+                const selector = command.split(',').slice(1).join(',');
+                console.log(`🖱️  CLICK_SELECTOR: "${selector}"`);
+                try {
+                    // 1. Get live coords + current DOM state
+                    const coords = await this.getLiveCoords(selector);
+                    if (!coords.found) throw new Error('Element not found');
+                    const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
+
+                    // 2. Move and click
+                    await this.moveToAbs(coords.x, coords.y, cursorStart);
+                    await this.sendCommand('CLICK');
+                    await new Promise(r => setTimeout(r, 200));
+
+                    // 3. Verify via DOM state — for checkboxes check el.checked toggled
+                    if (coords.checked !== null) {
+                        try {
+                            const check = await this.getLiveCoords(selector);
+                            if (check.found && check.checked === coords.checked) {
+                                console.log(`   ⚠️  checkbox unchanged — re-centering and retrying`);
+                                const cs = (typeof check.cursorX === 'number')
+                                    ? { x: check.cursorX, y: check.cursorY } : null;
+                                await this.moveToAbs(check.x, check.y, cs);
+                                await this.sendCommand('CLICK');
+                                await new Promise(r => setTimeout(r, 150));
+                            } else if (check.found) {
+                                console.log(`   ✅ checkbox → ${check.checked}`);
+                            }
+                        } catch (_) {
+                            console.log(`   ⚠️  checkbox verify timed out`);
+                        }
+                    }
+                } catch (err) {
+                    console.error(`   ❌ CLICK_SELECTOR failed: ${err.message}`);
+                }
+
             } else {
                 // Send other commands to Pico
                 await this.sendCommand(command);

@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Automation Test Form</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f2f5;
+      color: #1a1a1a;
+    }
+    .hero {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: white;
+      padding: 80px 40px;
+      text-align: center;
+    }
+    .hero h1 { font-size: 2.4rem; margin-bottom: 12px; }
+    .hero p { font-size: 1.1rem; opacity: 0.7; }
+    .spacer {
+      height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #888;
+      font-size: 0.9rem;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+    .form-card {
+      max-width: 600px;
+      margin: 0 auto 60px;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+      padding: 40px;
+    }
+    .form-card h2 {
+      font-size: 1.4rem;
+      margin-bottom: 28px;
+      padding-bottom: 16px;
+      border-bottom: 2px solid #f0f2f5;
+    }
+    .field-group { margin-bottom: 20px; }
+    label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #555;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    input[type="text"],
+    input[type="email"],
+    input[type="tel"],
+    textarea,
+    select {
+      width: 100%;
+      padding: 12px 14px;
+      border: 2px solid #e8eaed;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-family: inherit;
+      transition: border-color 0.2s;
+      background: #fafafa;
+    }
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: #4f46e5;
+      background: white;
+    }
+    textarea { resize: vertical; min-height: 100px; }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 0;
+    }
+    .checkbox-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
+      accent-color: #4f46e5;
+    }
+    .checkbox-row span { font-size: 0.95rem; color: #444; }
+    .submit-btn {
+      width: 100%;
+      padding: 14px;
+      background: #4f46e5;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: background 0.2s;
+    }
+    .submit-btn:hover { background: #4338ca; }
+    .section-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: #4f46e5;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 20px;
+    }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    #status {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #1a1a2e;
+      color: #4ade80;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 0.8rem;
+      font-family: monospace;
+      max-width: 320px;
+      word-break: break-all;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>Automation Test Form</h1>
+  <p>Scroll down to fill out the form &mdash; all fields have CSS selectors for live coord lookup</p>
+</div>
+
+<div class="spacer">&#8595; scroll down to the form &#8595;</div>
+
+<div class="form-card">
+  <div class="section-label">Personal Information</div>
+  <h2>Contact Details</h2>
+
+  <form id="test-form" onsubmit="handleSubmit(event)">
+    <div class="row">
+      <div class="field-group">
+        <label for="first-name">First Name</label>
+        <input type="text" id="first-name" name="first_name" placeholder="John">
+      </div>
+      <div class="field-group">
+        <label for="last-name">Last Name</label>
+        <input type="text" id="last-name" name="last_name" placeholder="Doe">
+      </div>
+    </div>
+
+    <div class="field-group">
+      <label for="email">Email Address</label>
+      <input type="email" id="email" name="email" placeholder="john@example.com">
+    </div>
+
+    <div class="field-group">
+      <label for="phone">Phone Number</label>
+      <input type="tel" id="phone" name="phone" placeholder="555-867-5309">
+    </div>
+
+    <div class="field-group">
+      <label for="company">Company</label>
+      <input type="text" id="company" name="company" placeholder="Acme Corp">
+    </div>
+
+    <div class="field-group">
+      <label for="department">Department</label>
+      <select id="department" name="department">
+        <option value="">Select a department</option>
+        <option value="engineering">Engineering</option>
+        <option value="design">Design</option>
+        <option value="marketing">Marketing</option>
+        <option value="sales">Sales</option>
+        <option value="other">Other</option>
+      </select>
+    </div>
+
+    <div class="field-group">
+      <label for="message">Message</label>
+      <textarea id="message" name="message" placeholder="Write your message here..."></textarea>
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="agree" name="agree">
+      <label for="agree">I agree to the terms and conditions</label>
+    </div>
+
+    <button type="submit" class="submit-btn">Submit Form</button>
+  </form>
+</div>
+
+<div id="status"></div>
+
+<!-- Test control panel -->
+<div style="position:fixed;top:16px;right:16px;background:#1a1a2e;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:8px;z-index:999;min-width:220px;">
+  <div style="color:#888;font-size:0.7rem;font-family:monospace;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Test Controls</div>
+  <div style="color:#6b7280;font-size:0.72rem;font-family:monospace;line-height:1.5;">
+    Park cursor anywhere, then:<br>
+    <span style="color:#facc15;">F</span> → fill whole form<br>
+    <span style="color:#facc15;">1</span> → fill first name only
+  </div>
+  <div style="border-top:1px solid #2d3748;margin:4px 0;"></div>
+  <button onclick="triggerFillForm(event)" style="background:#059669;color:white;border:none;border-radius:6px;padding:8px 12px;cursor:pointer;font-size:0.85rem;">Fill Whole Form (click)</button>
+  <div id="ctrl-status" style="color:#4ade80;font-size:0.7rem;font-family:monospace;min-height:16px;"></div>
+</div>
+
+<script>
+  // Track cursor position continuously so keyboard shortcuts know where to start from
+  let lastX = 0, lastY = 0;
+  window.addEventListener('mousemove', (e) => {
+    const ch = window.outerHeight - window.innerHeight;
+    lastX = Math.round(window.screenX + e.clientX);
+    lastY = Math.round(window.screenY + e.clientY + ch);
+  }, { passive: true });
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    const status = document.getElementById('status');
+    status.style.display = 'block';
+    status.textContent = 'Submitted: ' + JSON.stringify(data);
+    console.log('Form submitted:', data);
+  }
+
+  function setCtrlStatus(msg) {
+    document.getElementById('ctrl-status').textContent = msg;
+  }
+
+  function screenCursor(e) {
+    const ch = window.outerHeight - window.innerHeight;
+    return {
+      x: Math.round(window.screenX + e.clientX),
+      y: Math.round(window.screenY + e.clientY + ch)
+    };
+  }
+
+  function fillForm(cursorX, cursorY) {
+    setCtrlStatus('filling...');
+    fetch('http://localhost:3004/automation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        commands: [
+          'FILL_FIELD,#first-name,John',
+          'FILL_FIELD,#last-name,Doe',
+          'FILL_FIELD,#email,john@example.com',
+          'FILL_FIELD,#phone,555-867-5309',
+          'FILL_FIELD,#company,Acme Corp',
+          'FILL_FIELD,#message,This is an automated test message.',
+          'CLICK_SELECTOR,#agree',
+          'CLICK_SELECTOR,.submit-btn'
+        ],
+        cursorX, cursorY
+      })
+    }).then(() => setCtrlStatus('done!')).catch(() => setCtrlStatus('error — server running?'));
+  }
+
+  function fillFirstName(cursorX, cursorY) {
+    setCtrlStatus('filling first name...');
+    fetch('http://localhost:3004/automation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ commands: ['FILL_FIELD,#first-name,John'], cursorX, cursorY })
+    }).then(() => setCtrlStatus('done')).catch(() => setCtrlStatus('error'));
+  }
+
+  // Click button fallback — cursor starts at the button, moves to form fields
+  function triggerFillForm(e) {
+    const c = screenCursor(e);
+    fillForm(c.x, c.y);
+  }
+
+  // Keyboard shortcuts — park cursor anywhere, press key, automation starts from there
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'f' || e.key === 'F') { e.preventDefault(); fillForm(lastX, lastY); }
+    if (e.key === '1')                   { e.preventDefault(); fillFirstName(lastX, lastY); }
+  });
+
+  window._automationReady = true;
+</script>
+</body>
+</html>
