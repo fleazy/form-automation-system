@@ -138,7 +138,9 @@ function pollForCoordRequests() {
     .then(data => {
       if (!data || !data.selector) return;
 
-      const el = document.querySelector(data.selector);
+      // CLICK_OPTION path: selector = container div, labelText = option text to find
+      // Finds the label whose text matches, returns its input's state + label's coords.
+      let el = document.querySelector(data.selector);
       if (!el) {
         fetch('http://localhost:3004/coord-response', {
           method: 'POST',
@@ -148,17 +150,38 @@ function pollForCoordRequests() {
         return;
       }
 
-      // For checkboxes and radios the input itself is tiny (~18px).
-      // Prefer clicking an associated <label> — it's always much larger and
-      // works on any site without any HTML changes needed.
-      // Priority: label[for=id] > parent <label> > the input itself.
       let clickTarget = el;
-      if (el.type === 'checkbox' || el.type === 'radio') {
-        const labelFor = el.id
-          ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]')
-          : null;
-        const parentLabel = el.closest('label');
-        clickTarget = labelFor || parentLabel || el;
+
+      if (data.labelText) {
+        // Find the label inside the container whose text matches
+        const needle = data.labelText.trim().toLowerCase();
+        const labels = Array.from(el.querySelectorAll('label, [role="radio"], [role="option"]'));
+        const matched = labels.find(l => l.textContent.trim().toLowerCase().includes(needle));
+        if (matched) {
+          clickTarget = matched;
+          // Resolve the actual input inside for state reporting
+          el = matched.querySelector('input[type="radio"], input[type="checkbox"]') || matched;
+        } else {
+          // Label text not found — report not found so server can log it
+          fetch('http://localhost:3004/coord-response', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requestId: data.requestId, found: false, reason: 'label text not found: ' + data.labelText })
+          }).catch(() => {});
+          return;
+        }
+      } else {
+        // For checkboxes and radios the input itself is tiny (~18px).
+        // Prefer clicking an associated <label> — it's always much larger and
+        // works on any site without any HTML changes needed.
+        // Priority: label[for=id] > parent <label> > the input itself.
+        if (el.type === 'checkbox' || el.type === 'radio') {
+          const labelFor = el.id
+            ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]')
+            : null;
+          const parentLabel = el.closest('label');
+          clickTarget = labelFor || parentLabel || el;
+        }
       }
 
       // Scroll the click target into view, then re-measure once scroll settles
@@ -257,6 +280,16 @@ window.addEventListener('click', (e) => {
 }, { passive: true });
 
 setInterval(pollForCoordRequests, 300);
+
+// Press F to start queued automation
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'f' || e.key === 'F') {
+    const tag = document.activeElement && document.activeElement.tagName;
+    // Don't intercept F when typing in a text field
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement.isContentEditable) return;
+    fetch('http://localhost:3004/start', { method: 'POST' }).catch(() => {});
+  }
+});
 
 window.addEventListener('scroll', checkScrollPosition, { passive: true });
 window.addEventListener('load', () => setTimeout(detectFormFields, 1000), { passive: true });

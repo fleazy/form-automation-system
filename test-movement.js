@@ -147,16 +147,16 @@ class MovementTester {
 
     // ─── Live coord lookup ────────────────────────────────────────────────────
 
-    getLiveCoords(selector) {
+    getLiveCoords(selector, { labelText } = {}) {
         return new Promise((resolve, reject) => {
             const requestId = Date.now().toString();
-            this.pendingCoordRequest = { requestId, selector };
+            this.pendingCoordRequest = { requestId, selector, ...(labelText ? { labelText } : {}) };
             this.coordResolvers.set(requestId, resolve);
             setTimeout(() => {
                 if (this.coordResolvers.has(requestId)) {
                     this.coordResolvers.delete(requestId);
                     this.pendingCoordRequest = null;
-                    reject(new Error(`Timeout waiting for coords: ${selector}`));
+                    reject(new Error(`Timeout waiting for coords: ${selector}${labelText ? ' | ' + labelText : ''}`));
                 }
             }, 5000);
         });
@@ -196,6 +196,18 @@ class MovementTester {
                 const formPath = path.join(__dirname, 'test-form.html');
                 fs.readFile(formPath, 'utf8', (err, html) => {
                     if (err) { res.writeHead(404); res.end('test-form.html not found'); return; }
+                    res.setHeader('Content-Type', 'text/html');
+                    res.writeHead(200);
+                    res.end(html);
+                });
+                return;
+            }
+
+            // ── GET /test-form2 ───────────────────────────────────────────────
+            if (req.method === 'GET' && req.url === '/test-form2') {
+                const formPath = path.join(__dirname, 'test-form2.html');
+                fs.readFile(formPath, 'utf8', (err, html) => {
+                    if (err) { res.writeHead(404); res.end('test-form2.html not found'); return; }
                     res.setHeader('Content-Type', 'text/html');
                     res.writeHead(200);
                     res.end(html);
@@ -388,6 +400,40 @@ class MovementTester {
                                     console.error(`   ❌ ${err.message}`);
                                 }
 
+                            } else if (cmd.startsWith('CLICK_OPTION,')) {
+                                const parts = cmd.split(',');
+                                const containerSelector = parts[1];
+                                const labelText = parts.slice(2).join(',');
+                                console.log(`🖱️  CLICK_OPTION: "${containerSelector}" → "${labelText}"`);
+                                try {
+                                    const coords = await this.getLiveCoords(containerSelector, { labelText });
+                                    if (!coords.found) throw new Error(`Label "${labelText}" not found`);
+                                    const cursorStart = (typeof coords.cursorX === 'number')
+                                        ? { x: coords.cursorX, y: coords.cursorY } : null;
+                                    await this.moveToAbs(coords.x, coords.y, cursorStart);
+                                    this.port.write('CLICK\r\n');
+                                    await new Promise(r => setTimeout(r, 200));
+                                    if (coords.checked !== null) {
+                                        try {
+                                            const check = await this.getLiveCoords(containerSelector, { labelText });
+                                            if (check.found && check.checked === coords.checked) {
+                                                console.log(`   ⚠️  state unchanged — retrying`);
+                                                const cs = (typeof check.cursorX === 'number')
+                                                    ? { x: check.cursorX, y: check.cursorY } : null;
+                                                await this.moveToAbs(check.x, check.y, cs);
+                                                this.port.write('CLICK\r\n');
+                                                await new Promise(r => setTimeout(r, 150));
+                                            } else if (check.found) {
+                                                console.log(`   ✅ checked → ${check.checked}`);
+                                            }
+                                        } catch (_) { console.log(`   ⚠️  verify timed out`); }
+                                    } else {
+                                        console.log(`   ✅ clicked`);
+                                    }
+                                } catch (err) {
+                                    console.error(`   ❌ CLICK_OPTION failed: ${err.message}`);
+                                }
+
                             } else if (cmd.startsWith('DELAY,')) {
                                 await new Promise(r => setTimeout(r, parseInt(cmd.split(',')[1])));
 
@@ -408,7 +454,8 @@ class MovementTester {
 
         server.listen(3004, 'localhost', () => {
             console.log('🌐 Server on http://localhost:3004');
-            console.log('   Test form : http://localhost:3004/test-form');
+            console.log('   Test form  : http://localhost:3004/test-form');
+            console.log('   Test form 2: http://localhost:3004/test-form2');
             console.log('   Status    : curl http://localhost:3004/status');
             console.log('   Move test : curl -X POST http://localhost:3004/test-move \\');
             console.log('               -H "Content-Type: application/json" \\');

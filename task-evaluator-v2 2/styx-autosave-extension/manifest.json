@@ -1,0 +1,44 @@
+{
+    "manifest_version": 3,
+    "name": "Trigger",
+    "version": "1.0",
+    "description": "Automatically triggers SingleFile to save DataAnnotation/Styx task pages when loaded.",
+    "permissions": [
+        "tabs",
+        "activeTab",
+        "storage",
+        "scripting",
+        "pageCapture",
+        "downloads"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://app.dataannotation.tech/workers/tasks/*"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ],
+    "externally_connectable": {
+        "ids": [
+            "*"
+        ]
+    },
+    "icons": {
+        "48": "icon48.png",
+        "128": "icon128.png"
+    },
+    "action": {
+        "default_popup": "popup.html",
+        "default_icon": {
+            "48": "icon48.png",
+            "128": "icon128.png"
+        }
+    }
+}

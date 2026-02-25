@@ -1,0 +1,6 @@
+anthropic
+beautifulsoup4
+lxml
+watchdog
+python-dotenv
+flask

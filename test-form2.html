@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Support Request — Form 2</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f7f8fa;
+      color: #111;
+      padding: 40px 20px;
+    }
+    h1 { font-size: 1.6rem; margin-bottom: 6px; }
+    .subtitle { color: #666; font-size: 0.9rem; margin-bottom: 32px; }
+
+    .card {
+      max-width: 640px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 12px;
+      padding: 36px;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.07);
+    }
+
+    .section { margin-bottom: 28px; }
+    .section-title {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: #e85d04;
+      margin-bottom: 16px;
+    }
+
+    label.field-label {
+      display: block;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #444;
+      margin-bottom: 5px;
+    }
+    .field { margin-bottom: 16px; }
+
+    input[type="text"],
+    input[type="email"],
+    input[type="tel"],
+    textarea,
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1.5px solid #dde1e7;
+      border-radius: 7px;
+      font-size: 0.95rem;
+      font-family: inherit;
+      background: #fafbfc;
+      transition: border-color 0.15s;
+    }
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: #e85d04;
+      background: white;
+    }
+    textarea { min-height: 90px; resize: vertical; }
+
+    /* Radio group — each option is a label wrapping the input */
+    .radio-group { display: flex; flex-wrap: wrap; gap: 10px; }
+    .radio-group label {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 16px;
+      border: 1.5px solid #dde1e7;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 0.88rem;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .radio-group label:hover { border-color: #e85d04; }
+    .radio-group input[type="radio"] { accent-color: #e85d04; }
+
+    /* Checkboxes — different patterns to stress-test label detection */
+
+    /* Pattern A: label[for=id] separate from input */
+    .checkbox-a {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0;
+    }
+    .checkbox-a input[type="checkbox"] { width: 17px; height: 17px; accent-color: #e85d04; flex-shrink: 0; }
+
+    /* Pattern B: input wrapped inside <label> */
+    label.checkbox-b {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0;
+      cursor: pointer;
+      font-size: 0.92rem;
+      color: #333;
+    }
+    label.checkbox-b input[type="checkbox"] { width: 17px; height: 17px; accent-color: #e85d04; flex-shrink: 0; }
+
+    .submit-btn {
+      width: 100%;
+      padding: 13px;
+      background: #e85d04;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .submit-btn:hover { background: #c94f00; }
+
+    #status {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #111;
+      color: #6ee7b7;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 0.78rem;
+      font-family: monospace;
+      max-width: 340px;
+      word-break: break-all;
+      display: none;
+    }
+
+    /* Controls panel */
+    #ctrl {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      background: #111;
+      border-radius: 12px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 999;
+      min-width: 200px;
+    }
+    #ctrl .hd { color: #666; font-size: 0.68rem; font-family: monospace; text-transform: uppercase; letter-spacing: 1px; }
+    #ctrl .hint { color: #6b7280; font-size: 0.7rem; font-family: monospace; line-height: 1.6; }
+    #ctrl .hint span { color: #fbbf24; }
+    #ctrl hr { border: none; border-top: 1px solid #2d3748; }
+    #ctrl button { background: #059669; color: white; border: none; border-radius: 6px; padding: 8px 10px; cursor: pointer; font-size: 0.82rem; }
+    #ctrl-status { color: #6ee7b7; font-size: 0.68rem; font-family: monospace; min-height: 14px; }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Support Request</h1>
+  <p class="subtitle">Different layout, different element order — automation stress test</p>
+
+  <form id="support-form" onsubmit="handleSubmit(event)">
+
+    <!-- 1. Issue description FIRST (different order from form 1) -->
+    <div class="section">
+      <div class="section-title">The Problem</div>
+
+      <div class="field">
+        <label class="field-label" for="subject">Subject</label>
+        <input type="text" id="subject" name="subject" placeholder="One-line summary">
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="description">Description</label>
+        <textarea id="description" name="description" placeholder="Describe the issue in detail..."></textarea>
+      </div>
+    </div>
+
+    <!-- 2. Priority via radio buttons (input wrapped inside label) -->
+    <div class="section">
+      <div class="section-title">Priority</div>
+      <div class="radio-group">
+        <label><input type="radio" name="priority" value="low"> Low</label>
+        <label><input type="radio" name="priority" value="medium"> Medium</label>
+        <label><input type="radio" name="priority" value="high"> High</label>
+        <label><input type="radio" name="priority" value="critical"> Critical</label>
+      </div>
+    </div>
+
+    <!-- 3. Category select -->
+    <div class="section">
+      <div class="section-title">Category</div>
+      <div class="field">
+        <label class="field-label" for="category">Department</label>
+        <select id="category" name="category">
+          <option value="">— choose —</option>
+          <option value="billing">Billing</option>
+          <option value="technical">Technical Support</option>
+          <option value="account">Account</option>
+          <option value="general">General Inquiry</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- 4. Contact info LAST (different from form 1 where it was first) -->
+    <div class="section">
+      <div class="section-title">Your Details</div>
+
+      <div class="field">
+        <label class="field-label" for="fullname">Full Name</label>
+        <input type="text" id="fullname" name="fullname" placeholder="Jane Smith">
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="email">Email</label>
+        <input type="email" id="email" name="email" placeholder="jane@example.com">
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="phone">Phone (optional)</label>
+        <input type="tel" id="phone" name="phone" placeholder="555-000-1234">
+      </div>
+    </div>
+
+    <!-- 5. Checkboxes — two different HTML patterns -->
+    <div class="section">
+      <div class="section-title">Options</div>
+
+      <!-- Pattern A: separate label[for=id] -->
+      <div class="checkbox-a">
+        <input type="checkbox" id="urgent" name="urgent">
+        <label for="urgent">Mark this ticket as urgent</label>
+      </div>
+
+      <!-- Pattern B: input inside <label> (no for/id needed) -->
+      <label class="checkbox-b">
+        <input type="checkbox" name="updates">
+        Keep me updated by email
+      </label>
+    </div>
+
+    <button type="submit" class="submit-btn">Submit Request</button>
+  </form>
+</div>
+
+<div id="status"></div>
+
+<div id="ctrl">
+  <div class="hd">Test Controls</div>
+  <div class="hint">
+    Park cursor, then press:<br>
+    <span>F</span> → fill whole form<br>
+    <span>P</span> → priority radio only
+  </div>
+  <hr>
+  <button onclick="triggerFill(event)">Fill Whole Form (click)</button>
+  <div id="ctrl-status"></div>
+</div>
+
+<script>
+  let lastX = 0, lastY = 0;
+  window.addEventListener('mousemove', (e) => {
+    const ch = window.outerHeight - window.innerHeight;
+    lastX = Math.round(window.screenX + e.clientX);
+    lastY = Math.round(window.screenY + e.clientY + ch);
+  }, { passive: true });
+
+  function sc(e) {
+    const ch = window.outerHeight - window.innerHeight;
+    return { x: Math.round(window.screenX + e.clientX), y: Math.round(window.screenY + e.clientY + ch) };
+  }
+
+  function setStatus(msg) { document.getElementById('ctrl-status').textContent = msg; }
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    const el = document.getElementById('status');
+    el.style.display = 'block';
+    el.textContent = 'Submitted: ' + JSON.stringify(data);
+    console.log('Form 2 submitted:', data);
+  }
+
+  function fillForm(cursorX, cursorY) {
+    setStatus('filling...');
+    fetch('http://localhost:3004/automation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        commands: [
+          // Text fields — in form order
+          'FILL_FIELD,#subject,Automation system test — form 2',
+          'FILL_FIELD,#description,This form has a completely different layout and element order. Radio buttons use wrapped labels. Checkboxes use two different HTML patterns.',
+          // Radio — click the "high" option (input inside label)
+          'CLICK_SELECTOR,input[name="priority"][value="high"]',
+          // Contact fields come after in this form
+          'FILL_FIELD,#fullname,Jane Smith',
+          'FILL_FIELD,#email,jane@example.com',
+          'FILL_FIELD,#phone,555-000-1234',
+          // Checkbox A: separate label[for=urgent]
+          'CLICK_SELECTOR,#urgent',
+          // Checkbox B: input inside label (no id — select by name)
+          'CLICK_SELECTOR,input[name="updates"]',
+          // Submit
+          'CLICK_SELECTOR,.submit-btn'
+        ],
+        cursorX, cursorY
+      })
+    }).then(() => setStatus('done!')).catch(() => setStatus('error — server running?'));
+  }
+
+  function fillPriority(cursorX, cursorY) {
+    setStatus('clicking priority...');
+    fetch('http://localhost:3004/automation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        commands: ['CLICK_SELECTOR,input[name="priority"][value="medium"]'],
+        cursorX, cursorY
+      })
+    }).then(() => setStatus('done')).catch(() => setStatus('error'));
+  }
+
+  function triggerFill(e) { const c = sc(e); fillForm(c.x, c.y); }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'f' || e.key === 'F') { e.preventDefault(); fillForm(lastX, lastY); }
+    if (e.key === 'p' || e.key === 'P') { e.preventDefault(); fillPriority(lastX, lastY); }
+  });
+</script>
+</body>
+</html>

@@ -31,6 +31,7 @@ class ReadingBehaviorSimulator {
         this.detectedFields = null;
         this.pendingCoordRequest = null;
         this.coordResolvers = new Map();
+        this.pendingAutomationData = null;
         
         process.on('SIGINT', () => {
             console.log('\n🛑 STOPPING READING SESSION!');
@@ -47,16 +48,7 @@ class ReadingBehaviorSimulator {
         
         this.setupExtensionServer();
         
-        console.log('📖 Reading Behavior Simulator ready!');
-        console.log('📋 MANUAL: Load a page in Chrome - simulation will auto-start in 5 seconds...');
-        
-        // Auto-start after 5 seconds (simulating page load)
-        setTimeout(() => {
-            if (!this.isReading) {
-                console.log('🚀 Auto-starting reading session...');
-                this.startReadingSession();
-            }
-        }, 5000);
+        console.log('📖 Ready — open the form in Chrome, then press F to start.');
     }
     
     async sendCommand(command) {
@@ -570,16 +562,16 @@ class ReadingBehaviorSimulator {
     // Ask content.js for the current screen coordinates of an element.
     // content.js polls /coord-request, scrolls the element into view,
     // and posts back to /coord-response with fresh coords.
-    getLiveCoords(selector) {
+    getLiveCoords(selector, { labelText } = {}) {
         return new Promise((resolve, reject) => {
             const requestId = Date.now().toString();
-            this.pendingCoordRequest = { requestId, selector };
+            this.pendingCoordRequest = { requestId, selector, ...(labelText ? { labelText } : {}) };
             this.coordResolvers.set(requestId, resolve);
             setTimeout(() => {
                 if (this.coordResolvers.has(requestId)) {
                     this.coordResolvers.delete(requestId);
                     this.pendingCoordRequest = null;
-                    reject(new Error(`Coord request timed out for: ${selector}`));
+                    reject(new Error(`Coord request timed out for: ${selector}${labelText ? ' | ' + labelText : ''}`));
                 }
             }, 5000);
         });
@@ -615,7 +607,9 @@ class ReadingBehaviorSimulator {
                 req.on('end', () => {
                     try {
                         const data = JSON.parse(body);
-                        this.handleAutomationCommands(data);
+                        this.pendingAutomationData = data;
+                        const count = (data.commands || []).length;
+                        console.log(`📥 Queued ${count} commands — press F in the browser to run`);
                         res.writeHead(200);
                         res.end('OK');
                     } catch (error) {
@@ -623,6 +617,17 @@ class ReadingBehaviorSimulator {
                         res.end('Invalid JSON');
                     }
                 });
+            } else if (req.method === 'POST' && req.url === '/start') {
+                if (!this.pendingAutomationData) {
+                    res.writeHead(400);
+                    res.end('No pending commands');
+                    return;
+                }
+                console.log('▶️  F pressed — starting automation');
+                this.handleAutomationCommands(this.pendingAutomationData);
+                this.pendingAutomationData = null;
+                res.writeHead(200);
+                res.end('OK');
             } else if (req.method === 'POST' && req.url === '/test-move') {
                 // Delayed test so you can run curl then switch to the browser.
                 // Body: { "delay": 4000, "moves": [[x1,y1],[x2,y2],...] }
@@ -740,6 +745,45 @@ class ReadingBehaviorSimulator {
                     res.writeHead(200);
                     res.end(html);
                 });
+            } else if (req.method === 'GET' && req.url === '/test-form2') {
+                const fs = require('fs');
+                const path = require('path');
+                const formPath = path.join(__dirname, 'test-form2.html');
+                fs.readFile(formPath, 'utf8', (err, html) => {
+                    if (err) { res.writeHead(404); res.end('test-form2.html not found'); return; }
+                    res.setHeader('Content-Type', 'text/html');
+                    res.writeHead(200);
+                    res.end(html);
+                });
+            } else if (req.method === 'GET' && req.url === '/current-form') {
+                // Serve the most recently saved task HTML from the evaluator's current.json
+                const fs = require('fs');
+                const path = require('path');
+                const currentJsonPath = path.join(__dirname, 'task-evaluator-v2 2', 'current.json');
+                try {
+                    const currentJson = JSON.parse(fs.readFileSync(currentJsonPath, 'utf8'));
+                    const htmlPath = currentJson.file;
+                    if (!htmlPath || !fs.existsSync(htmlPath)) {
+                        res.writeHead(404); res.end('HTML file not found — check current.json .file path'); return;
+                    }
+                    fs.readFile(htmlPath, 'utf8', (err, html) => {
+                        if (err) { res.writeHead(404); res.end('Could not read form HTML'); return; }
+                        // Inject F-key trigger so it works even without the extension
+                        const inject = `<script>
+window.addEventListener('keydown', function(e) {
+  if ((e.key === 'f' || e.key === 'F') && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA' && !document.activeElement.isContentEditable) {
+    fetch('http://localhost:3004/start', { method: 'POST' }).catch(function(){});
+  }
+});
+<\/script>`;
+                        html = html.replace('</body>', inject + '</body>');
+                        res.setHeader('Content-Type', 'text/html');
+                        res.writeHead(200);
+                        res.end(html);
+                    });
+                } catch (e) {
+                    res.writeHead(500); res.end('current.json missing or invalid');
+                }
             } else {
                 res.writeHead(404);
                 res.end();
@@ -909,6 +953,39 @@ class ReadingBehaviorSimulator {
                     }
                 } catch (err) {
                     console.error(`   ❌ CLICK_SELECTOR failed: ${err.message}`);
+                }
+
+            // CLICK_OPTION,#question-N,label text — finds radio/checkbox by label text
+            } else if (command.startsWith('CLICK_OPTION,')) {
+                const parts = command.split(',');
+                const containerSelector = parts[1];
+                const labelText = parts.slice(2).join(',');
+                console.log(`🖱️  CLICK_OPTION: "${containerSelector}" → "${labelText}"`);
+                try {
+                    const coords = await this.getLiveCoords(containerSelector, { labelText });
+                    if (!coords.found) throw new Error(`Label "${labelText}" not found in ${containerSelector}`);
+                    const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
+                    await this.moveToAbs(coords.x, coords.y, cursorStart);
+                    await this.sendCommand('CLICK');
+                    await new Promise(r => setTimeout(r, 200));
+                    if (coords.checked !== null) {
+                        try {
+                            const check = await this.getLiveCoords(containerSelector, { labelText });
+                            if (check.found && check.checked === coords.checked) {
+                                console.log(`   ⚠️  state unchanged — retrying`);
+                                const cs = (typeof check.cursorX === 'number') ? { x: check.cursorX, y: check.cursorY } : null;
+                                await this.moveToAbs(check.x, check.y, cs);
+                                await this.sendCommand('CLICK');
+                                await new Promise(r => setTimeout(r, 150));
+                            } else if (check.found) {
+                                console.log(`   ✅ checked → ${check.checked}`);
+                            }
+                        } catch (_) { console.log(`   ⚠️  verify timed out`); }
+                    } else {
+                        console.log(`   ✅ clicked`);
+                    }
+                } catch (err) {
+                    console.error(`   ❌ CLICK_OPTION failed: ${err.message}`);
                 }
 
             } else {

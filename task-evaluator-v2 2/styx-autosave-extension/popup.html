@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 280px;
+      padding: 16px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #1a1b26;
+      color: #c0caf5;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .header h1 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #7aa2f7;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #24283b;
+      margin-bottom: 12px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .status-dot.on {
+      background: #9ece6a;
+      box-shadow: 0 0 6px #9ece6a;
+    }
+
+    .status-dot.off {
+      background: #f7768e;
+    }
+
+    .status-text {
+      font-size: 12px;
+    }
+
+    .toggle-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+    }
+
+    .toggle-label {
+      font-size: 12px;
+      color: #a9b1d6;
+    }
+
+    .toggle {
+      position: relative;
+      width: 40px;
+      height: 22px;
+      cursor: pointer;
+    }
+
+    .toggle input {
+      display: none;
+    }
+
+    .toggle .slider {
+      position: absolute;
+      inset: 0;
+      background: #3b4261;
+      border-radius: 11px;
+      transition: 0.2s;
+    }
+
+    .toggle .slider::before {
+      content: '';
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      left: 3px;
+      top: 3px;
+      background: #c0caf5;
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+
+    .toggle input:checked+.slider {
+      background: #7aa2f7;
+    }
+
+    .toggle input:checked+.slider::before {
+      transform: translateX(18px);
+    }
+
+    .delay-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 0;
+    }
+
+    .delay-row label {
+      font-size: 12px;
+      color: #a9b1d6;
+    }
+
+    .delay-row input {
+      width: 60px;
+      padding: 4px 8px;
+      font-size: 12px;
+      background: #24283b;
+      border: 1px solid #3b4261;
+      border-radius: 6px;
+      color: #c0caf5;
+      text-align: center;
+    }
+
+    .delay-row span {
+      font-size: 11px;
+      color: #565f89;
+    }
+
+    .footer {
+      margin-top: 12px;
+      padding-top: 8px;
+      border-top: 1px solid #24283b;
+      font-size: 10px;
+      color: #565f89;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="header">
+    <span>⭐</span>
+    <h1>Trigger</h1>
+  </div>
+
+  <div class="status" id="statusBar">
+    <span class="status-dot on" id="statusDot"></span>
+    <span class="status-text" id="statusText">Watching for task pages...</span>
+  </div>
+
+  <div class="toggle-row">
+    <span class="toggle-label">Auto-save enabled</span>
+    <label class="toggle">
+      <input type="checkbox" id="enabledToggle" checked>
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="delay-row">
+    <label for="delayInput">Save delay:</label>
+    <input type="number" id="delayInput" value="5" min="1" max="30" step="1">
+    <span>seconds</span>
+  </div>
+
+  <div class="footer">
+    Triggers SingleFile.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+
+</html>
