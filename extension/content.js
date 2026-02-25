@@ -184,35 +184,41 @@ function pollForCoordRequests() {
         }
       }
 
-      // Scroll the click target into view, then re-measure once scroll settles
-      clickTarget.scrollIntoView({ behavior: 'instant', block: 'center' });
+      // Report element position WITHOUT scrolling — server handles scrolling via Pico
       setTimeout(() => {
         const rect = clickTarget.getBoundingClientRect();
         const windowX = window.screenX || window.screenLeft || 0;
         const windowY = window.screenY || window.screenTop || 0;
         const chromeOffset = window.outerHeight - window.innerHeight;
+        const vH = window.innerHeight;
+        const inViewport = rect.top >= 0 && rect.bottom <= vH && rect.width > 0;
+        // Exact pixel delta that scrollIntoView({block:'center'}) would scroll
+        const elementAbsTop = rect.top + window.scrollY;
+        const targetScrollY = elementAbsTop + rect.height / 2 - vH / 2;
+        const scrollDeltaNeeded = Math.round(targetScrollY - window.scrollY);
         fetch('http://localhost:3004/coord-response', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             requestId: data.requestId,
             selector: data.selector,
-            // Click target centre — may be a label rather than the input itself
             x: windowX + Math.round(rect.left + rect.width / 2),
             y: windowY + Math.round(rect.top + rect.height / 2) + chromeOffset,
-            // Cursor's actual position at this exact moment
             cursorX: liveCursorX,
             cursorY: liveCursorY,
-            // Full DOM state from the actual form element (el), not the label
             value:     el.value   !== undefined ? el.value   : '',
             checked:   el.checked !== undefined ? el.checked : null,
             focused:   document.activeElement === el,
             tagName:   el.tagName.toLowerCase(),
             inputType: el.type || el.tagName.toLowerCase(),
-            found: true
+            found: true,
+            inViewport,
+            viewportTop: Math.round(rect.top),
+            viewportH: Math.round(vH),
+            scrollDeltaNeeded
           })
         }).catch(() => {});
-      }, 150);
+      }, 50);
     })
     .catch(() => {});
 }

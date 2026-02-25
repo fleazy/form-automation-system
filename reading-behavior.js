@@ -495,14 +495,23 @@ class ReadingBehaviorSimulator {
             return;
         }
 
+        // Overshoot: move a few px past target in the direction of travel, then pull back
+        const overshootMag = (dist > 20) ? (5 + Math.random() * 14) : 0;
+        const len = Math.max(dist, 1);
+        const overshootX = Math.round(targetX + (dx / len) * overshootMag);
+        const overshootY = Math.round(targetY + (dy / len) * overshootMag);
+        const fullDx = overshootX - from.x;
+        const fullDy = overshootY - from.y;
+        const fullDist = Math.sqrt(fullDx * fullDx + fullDy * fullDy);
+
         const STEP = 15; // px per step — no pointer acceleration, go fast
-        const steps = Math.ceil(dist / STEP);
+        const steps = Math.ceil(fullDist / STEP);
         let sentX = 0, sentY = 0;
 
         for (let i = 1; i <= steps; i++) {
             if (this.emergencyStop) break;
-            const wantX = Math.round(dx * i / steps);
-            const wantY = Math.round(dy * i / steps);
+            const wantX = Math.round(fullDx * i / steps);
+            const wantY = Math.round(fullDy * i / steps);
             let sdx = wantX - sentX;
             let sdy = wantY - sentY;
             // Occasional ±1px jitter so the path isn't a perfectly straight line
@@ -513,6 +522,25 @@ class ReadingBehaviorSimulator {
                 sentY = wantY;
             }
             await new Promise(r => setTimeout(r, 8 + Math.round(Math.random() * 3)));
+        }
+
+        // Pause at overshoot, then pull back to actual target
+        if (overshootMag > 0) {
+            await new Promise(r => setTimeout(r, 25 + Math.round(Math.random() * 45)));
+            const backDx = targetX - overshootX;
+            const backDy = targetY - overshootY;
+            const backSteps = Math.max(1, Math.ceil(Math.sqrt(backDx * backDx + backDy * backDy)));
+            let bSentX = 0, bSentY = 0;
+            for (let s = 1; s <= backSteps; s++) {
+                if (this.emergencyStop) break;
+                const wbx = Math.round(backDx * s / backSteps) - bSentX;
+                const wby = Math.round(backDy * s / backSteps) - bSentY;
+                if (wbx !== 0 || wby !== 0) {
+                    this.port.write(`MOVE,${wbx},${wby}\r\n`);
+                    bSentX += wbx; bSentY += wby;
+                }
+                await new Promise(r => setTimeout(r, 12 + Math.round(Math.random() * 8)));
+            }
         }
 
         // Brief settle for browser mousemove events
@@ -538,6 +566,52 @@ class ReadingBehaviorSimulator {
         }
 
         this.currentPosition = { x: targetX, y: targetY };
+    }
+
+    async scrollToElement(selector, options = {}) {
+        // Feedback-loop scroll: send one burst, ask extension if element is in view, repeat.
+        // No calibration constants needed — the extension tells us the truth each time.
+        const MAX_ATTEMPTS = 15;
+
+        let coords = await this.getLiveCoords(selector, options);
+        if (!coords.found || coords.inViewport) return coords;
+
+        let lastDirection = 1;
+        let attempts = 0;
+
+        while (!coords.inViewport && attempts < MAX_ATTEMPTS) {
+            if (this.emergencyStop) break;
+
+            const delta = coords.scrollDeltaNeeded || (coords.viewportTop < 0
+                ? coords.viewportTop
+                : coords.viewportTop - (coords.viewportH || 800));
+            lastDirection = delta > 0 ? 1 : -1;
+
+            const units = 120 + Math.floor(Math.random() * 51); // 120-170, same as randomScroll
+            console.log(`📜 Scroll ${attempts + 1}/${MAX_ATTEMPTS}: delta=${delta}px → ${lastDirection * units} units`);
+            await this.sendCommand(`SCROLL,${lastDirection * units}`);
+            await new Promise(r => setTimeout(r, 80 + Math.round(Math.random() * 80)));
+
+            coords = await this.getLiveCoords(selector, options);
+            if (!coords.found) break;
+            attempts++;
+        }
+
+        if (coords.inViewport) {
+            // Small overshoot + pullback for naturalness
+            const overshoot = 15 + Math.floor(Math.random() * 20);
+            await this.sendCommand(`SCROLL,${lastDirection * overshoot}`);
+            await new Promise(r => setTimeout(r, 60 + Math.round(Math.random() * 40)));
+            const pullback = 10 + Math.floor(Math.random() * 10);
+            await this.sendCommand(`SCROLL,${-lastDirection * pullback}`);
+            await new Promise(r => setTimeout(r, 60 + Math.round(Math.random() * 40)));
+            console.log(`📜 In view after ${attempts} scroll(s)`);
+        } else {
+            console.log(`📜 ⚠️  element still not in view after ${MAX_ATTEMPTS} attempts`);
+        }
+
+        await new Promise(r => setTimeout(r, 150)); // settle
+        return coords;
     }
 
     isHoveringSelector(selector) {
@@ -874,16 +948,22 @@ window.addEventListener('keydown', function(e) {
                 console.log(`📝 FILL_FIELD: "${selector}" → "${text}"`);
                 try {
                     // 1. Get live coords + current DOM state
-                    const coords = await this.getLiveCoords(selector);
+                    let coords = await this.getLiveCoords(selector);
                     if (!coords.found) throw new Error('Element not found');
+
+                    // 2. Scroll into view via Pico if needed (feedback loop)
+                    if (!coords.inViewport) {
+                        coords = await this.scrollToElement(selector);
+                        if (!coords.found) throw new Error('Element lost during scroll');
+                    }
                     const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
 
-                    // 2. Move and click
+                    // 3. Move and click
                     await this.moveToAbs(coords.x, coords.y, cursorStart);
                     await this.sendCommand('CLICK');
                     await new Promise(r => setTimeout(r, 200));
 
-                    // 3. Verify focus via DOM (document.activeElement === el)
+                    // 4. Verify focus via DOM (document.activeElement === el)
                     //    Retry once with fresh coords if click missed
                     try {
                         const afterClick = await this.getLiveCoords(selector);
@@ -924,16 +1004,22 @@ window.addEventListener('keydown', function(e) {
                 console.log(`🖱️  CLICK_SELECTOR: "${selector}"`);
                 try {
                     // 1. Get live coords + current DOM state
-                    const coords = await this.getLiveCoords(selector);
+                    let coords = await this.getLiveCoords(selector);
                     if (!coords.found) throw new Error('Element not found');
+
+                    // 2. Scroll into view via Pico if needed (feedback loop)
+                    if (!coords.inViewport) {
+                        coords = await this.scrollToElement(selector);
+                        if (!coords.found) throw new Error('Element lost during scroll');
+                    }
                     const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
 
-                    // 2. Move and click
+                    // 3. Move and click
                     await this.moveToAbs(coords.x, coords.y, cursorStart);
                     await this.sendCommand('CLICK');
                     await new Promise(r => setTimeout(r, 200));
 
-                    // 3. Verify via DOM state — for checkboxes check el.checked toggled
+                    // 4. Verify via DOM state — for checkboxes check el.checked toggled
                     if (coords.checked !== null) {
                         try {
                             const check = await this.getLiveCoords(selector);
@@ -962,12 +1048,18 @@ window.addEventListener('keydown', function(e) {
                 const labelText = parts.slice(2).join(',');
                 console.log(`🖱️  CLICK_OPTION: "${containerSelector}" → "${labelText}"`);
                 try {
-                    const coords = await this.getLiveCoords(containerSelector, { labelText });
+                    let coords = await this.getLiveCoords(containerSelector, { labelText });
                     if (!coords.found) throw new Error(`Label "${labelText}" not found in ${containerSelector}`);
+
+                    // Scroll into view via Pico if needed (feedback loop)
+                    if (!coords.inViewport) {
+                        coords = await this.scrollToElement(containerSelector, { labelText });
+                        if (!coords.found) throw new Error('Element lost during scroll');
+                    }
                     const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
                     await this.moveToAbs(coords.x, coords.y, cursorStart);
                     await this.sendCommand('CLICK');
-                    await new Promise(r => setTimeout(r, 200));
+                    await new Promise(r => setTimeout(r, 350));
                     if (coords.checked !== null) {
                         try {
                             const check = await this.getLiveCoords(containerSelector, { labelText });
@@ -976,7 +1068,14 @@ window.addEventListener('keydown', function(e) {
                                 const cs = (typeof check.cursorX === 'number') ? { x: check.cursorX, y: check.cursorY } : null;
                                 await this.moveToAbs(check.x, check.y, cs);
                                 await this.sendCommand('CLICK');
-                                await new Promise(r => setTimeout(r, 150));
+                                await new Promise(r => setTimeout(r, 350));
+                                // Verify retry worked
+                                const check2 = await this.getLiveCoords(containerSelector, { labelText });
+                                if (check2.found && check2.checked === coords.checked) {
+                                    console.log(`   ❌ still unchanged after retry`);
+                                } else {
+                                    console.log(`   ✅ retry succeeded → ${check2.checked}`);
+                                }
                             } else if (check.found) {
                                 console.log(`   ✅ checked → ${check.checked}`);
                             }
