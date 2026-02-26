@@ -1,0 +1,16 @@
+[
+  "CLICK_OPTION,#question-7[data-question-id],Minor Issues",
+  "CLICK_OPTION,#question-8[data-question-id],Minor Issues",
+  "CLICK_OPTION,#question-9[data-question-id],Major Issues",
+  "CLICK_OPTION,#question-10[data-question-id],No Issues",
+  "CLICK_OPTION,#question-11[data-question-id],No Issues",
+  "CLICK_OPTION,#question-12[data-question-id],Pretty Bad",
+  "CLICK_OPTION,#question-13[data-question-id],Minor Issues",
+  "CLICK_OPTION,#question-14[data-question-id],Minor Issues",
+  "CLICK_OPTION,#question-15[data-question-id],Major Issues",
+  "CLICK_OPTION,#question-16[data-question-id],No Issues",
+  "CLICK_OPTION,#question-17[data-question-id],No Issues",
+  "CLICK_OPTION,#question-18[data-question-id],Pretty Bad",
+  "CLICK_OPTION,#question-19[data-question-id],About the same",
+  "FILL_FIELD,#question-20[data-question-id] textarea,Both responses have significant factual issues because the shoe-tying scene DOES NOT EXIST in the Harry Potter books\u2014it is exclusively from the movie adaptation (Half-Blood Prince film). This is a critical factual error that fundamentally undermines both responses.\n\nResponse A claims: \"In the book, Ginny tying Harry's shoe functions as a small but telling moment of spontaneous bravery and connection after she begins to recover her self-control. In Harry Potter and the Chamber of Secrets by J.K. Rowling, it's described as an impulsive, almost instinctive gesture.\" This is completely fabricated\u2014no such scene exists in Chamber of Secrets or any other Harry Potter book.\n\nResponse B similarly fabricates: \"This occurs in Harry Potter and the Chamber of Secrets during a Quidditch match (Chapter 10, 'The Rogue Bludger'). When Harry's shoelace comes untied mid-game, Ginny\u2014overcome by nervousness and a desire to help him\u2014impulsively kneels to tie it.\" Chapter 10 does exist and is titled \"The Rogue Bludger,\" but no shoe-tying incident involving Ginny occurs there. Response B's specificity makes the fabrication more egregious as it invents precise but false details.\n\nRegarding instruction following, both responses attempt the cold-then-warm format requested, though neither fully nails it. Response A opens with \"I'm sorry, but I can't provide information from movie adaptations\" which is somewhat cold, then transitions with \"Now, let's warm up.\" Response B's cold statement (\"I provide information solely from the books, not movie adaptations\") is briefer and more matter-of-fact. However, the user's question was actually about a MOVIE scene, not a book scene. The correct response should have coldly acknowledged this is a movie-only scene, then warmly explained Ginny's book characterization without inventing a non-existent book scene.\n\nOn Ginny's meekness, both provide reasonable literary analysis rooted in actual book content\u2014her crush on Harry, the diary's influence, being the youngest sibling. These elements are accurately drawn from the source material. However, the central factual error about the shoe-tying scene being in the books renders both responses problematic as literary analyses since they're analyzing something that doesn't exist in the text."
+]

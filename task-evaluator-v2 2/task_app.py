@@ -48,7 +48,11 @@ def _sanitize_key(label: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_\- ]', '', label).strip().lower().replace(' ', '_').replace('-', '_')
 
 def build_automation_commands(task_data: dict, evaluation: dict) -> list:
-    """Map Claude's evaluation answers → FILL_FIELD / CLICK_SELECTOR commands."""
+    """Map Claude's evaluation answers → FILL_FIELD / CLICK_SELECTOR commands.
+    
+    Uses the unique CSS selector from extract_task (based on data-question-id UUID)
+    to target the correct DOM element, avoiding ghost/duplicate question divs.
+    """
     commands = []
     for q in task_data.get('questions', []):
         label = q.get('label') or (q.get('text') or '')[:80] or f"question_{q.get('number','?')}"
@@ -59,27 +63,27 @@ def build_automation_commands(task_data: dict, evaluation: dict) -> list:
         if answer is None or (isinstance(answer, str) and not answer.strip()):
             continue
 
-        q_num  = q.get('number', '')
         q_type = q.get('type', 'unknown')
         opts   = q.get('options', [])
+        # Use the pre-built selector from extract_task (UUID-based, globally unique)
+        sel    = q.get('selector', '')
 
-        if q_type == 'unknown':
+        if q_type == 'unknown' or not sel:
             continue
 
         if q_type == 'radio':
-            # Match by label first, fall back to value (React forms often have no value attr)
             match = next((o for o in opts if o.get('label','').strip().lower() == str(answer).strip().lower()), None)
             if match is None:
                 match = next((o for o in opts if o.get('value','').strip().lower() == str(answer).strip().lower()), None)
             if match:
                 label_text = (match.get('label') or match.get('value') or '').strip()
                 if label_text:
-                    commands.append(f'CLICK_OPTION,#question-{q_num}[data-question-id],{label_text}')
+                    commands.append(f'CLICK_OPTION,{sel},{label_text}')
 
         elif q_type == 'textarea':
             text = str(answer).strip()
             if text:
-                commands.append(f'FILL_FIELD,#question-{q_num}[data-question-id] textarea,{text}')
+                commands.append(f'FILL_FIELD,{sel} textarea,{text}')
 
         elif q_type == 'checkbox':
             answers = answer if isinstance(answer, list) else [answer]
@@ -88,7 +92,7 @@ def build_automation_commands(task_data: dict, evaluation: dict) -> list:
                 if match:
                     label_text = (match.get('label') or match.get('value') or '').strip()
                     if label_text:
-                        commands.append(f'CLICK_OPTION,#question-{q_num}[data-question-id],{label_text}')
+                        commands.append(f'CLICK_OPTION,{sel},{label_text}')
 
     return commands
 
@@ -263,6 +267,60 @@ def api_fill_form():
         return jsonify({"error": "No evaluation available yet"}), 400
     threading.Thread(target=trigger_automation, args=(td, ev), daemon=True).start()
     return jsonify({"ok": True})
+
+@app.route("/api/test-fill", methods=["POST"])
+def api_test_fill():
+    """Send automation commands using a hardcoded mock evaluation.
+    
+    Skips the Claude API entirely — useful for testing the extension ↔ Pico
+    pipeline without burning API credits.  Uses current.json as the task data.
+    """
+    with history_lock:
+        td = latest_task_data
+    if not td:
+        return jsonify({"error": "No task data loaded — process an HTML file first"}), 400
+
+    mock_eval = {
+        "model_a_instruction_following": "Minor Issues",
+        "model_a_completeness":          "No Issues",
+        "model_a_factuality":            "Major Issues",
+        "model_a_conciseness_relevance": "Minor Issues",
+        "model_a_style_tone":            "No Issues",
+        "model_a_overall_quality":       "Pretty Good",
+        "model_b_instruction_following": "No Issues",
+        "model_b_completeness":          "No Issues",
+        "model_b_factuality":            "Minor Issues",
+        "model_b_conciseness_relevance": "No Issues",
+        "model_b_style_tone":            "Minor Issues",
+        "model_b_overall_quality":       "Pretty Good",
+        "which_response_is_better_a_vs_b": "Response B is slightly better",
+        "explanation": "This is a test explanation for automated form filling. Both responses addressed the prompt adequately but Response B provided more grounded information.",
+        "additional_comments": "",
+    }
+    threading.Thread(target=trigger_automation, args=(td, mock_eval), daemon=True).start()
+    return jsonify({"ok": True, "commands_from": "mock evaluation", "keys": list(mock_eval.keys())})
+
+@app.route("/api/scan", methods=["POST"])
+def api_scan():
+    """Ask the extension to scan all questions on the live page.
+    
+    Returns the full question map — useful for debugging what the
+    extension can see vs what current.json contains.
+    """
+    import urllib.request as _ur
+    try:
+        # Trigger scan via reading-behavior server
+        req = _ur.Request(
+            'http://localhost:3004/trigger-scan',
+            data=b'{}',
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        resp = _ur.urlopen(req, timeout=15)
+        result = json.loads(resp.read().decode())
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/history/<int:task_id>", methods=["DELETE"])
 def api_history_delete(task_id):
@@ -571,6 +629,19 @@ def main():
     observer = Observer()
     observer.schedule(handler, str(DOWNLOADS_DIR), recursive=False)
     observer.start()
+
+    # Pre-load current.json if it exists so /api/test-fill works immediately
+    global latest_task_data
+    cj = SCRIPT_DIR / "current.json"
+    if cj.exists() and latest_task_data is None:
+        try:
+            with open(cj, "r", encoding="utf-8") as f:
+                latest_task_data = json.load(f)
+            nq = len(latest_task_data.get("questions", []))
+            print(f"📂 Pre-loaded current.json ({nq} questions)")
+        except Exception as e:
+            print(f"⚠  Could not pre-load current.json: {e}")
+
     mode = "watch only" if no_eval else "watch + auto-evaluate"
     print(f"⭐ Task Evaluator ({mode})")
     print(f"   Model: {STYX_MODEL}")

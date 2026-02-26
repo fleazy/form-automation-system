@@ -1,6 +1,58 @@
 let isAtBottom = false;
 let formFieldsDetected = false;
 
+// ── DOM change logger ─────────────────────────────────────────────────
+// Watches all radio/checkbox/textarea changes and logs them to the server
+// so we can see exactly what the automation is (or isn't) doing.
+(function initDOMChangeLogger() {
+  // Listen for input change events (radio, checkbox)
+  document.addEventListener('change', (e) => {
+    const el = e.target;
+    if (el.type === 'radio' || el.type === 'checkbox') {
+      const qdiv = el.closest('div[data-question-id]');
+      const label = el.closest('label');
+      const info = {
+        event: 'change',
+        type: el.type,
+        checked: el.checked,
+        labelText: label ? label.textContent.trim().substring(0, 60) : '',
+        questionId: qdiv ? qdiv.getAttribute('data-question-id').substring(0, 8) : '??',
+        questionLabel: qdiv ? (qdiv.getAttribute('data-label') || '') : '',
+        timestamp: Date.now(),
+      };
+      console.log(`🔄 DOM change: [${info.questionLabel}] ${info.type} → "${info.labelText}" checked=${info.checked}`);
+      fetch('http://localhost:3004/dom-change', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(info)
+      }).catch(() => {});
+    }
+  }, { capture: true });
+
+  // Listen for textarea input
+  document.addEventListener('input', (e) => {
+    const el = e.target;
+    if (el.tagName === 'TEXTAREA') {
+      const qdiv = el.closest('div[data-question-id]');
+      const info = {
+        event: 'input',
+        type: 'textarea',
+        valueLength: el.value.length,
+        valueTrunc: el.value.substring(0, 80),
+        questionId: qdiv ? qdiv.getAttribute('data-question-id').substring(0, 8) : '??',
+        questionLabel: qdiv ? (qdiv.getAttribute('data-label') || '') : '',
+        timestamp: Date.now(),
+      };
+      console.log(`🔄 DOM input: [${info.questionLabel}] textarea len=${info.valueLength}`);
+      fetch('http://localhost:3004/dom-change', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(info)
+      }).catch(() => {});
+    }
+  }, { capture: true });
+})();
+
 function checkScrollPosition() {
   const currentScrollY = window.pageYOffset || document.documentElement.scrollTop;
   const scrollHeight = document.documentElement.scrollHeight;
@@ -215,7 +267,11 @@ function pollForCoordRequests() {
             inViewport,
             viewportTop: Math.round(rect.top),
             viewportH: Math.round(vH),
-            scrollDeltaNeeded
+            scrollDeltaNeeded,
+            vpLeft: windowX,
+            vpTop: windowY + chromeOffset,
+            vpRight: windowX + window.innerWidth,
+            vpBottom: windowY + chromeOffset + window.innerHeight
           })
         }).catch(() => {});
       }, 50);
@@ -269,7 +325,14 @@ window.addEventListener('mousemove', (e) => {
   fetch('http://localhost:3004/cursor-position', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ x: liveCursorX, y: liveCursorY, hoveredId, hoveredName })
+    body: JSON.stringify({
+      x: liveCursorX, y: liveCursorY, hoveredId, hoveredName,
+      // Viewport bounds in absolute screen coords so server can clamp mouse
+      vpLeft: windowX,
+      vpTop: windowY + chromeOffset,
+      vpRight: windowX + window.innerWidth,
+      vpBottom: windowY + chromeOffset + window.innerHeight
+    })
   }).catch(() => {});
 }, { passive: true });
 
@@ -285,7 +348,160 @@ window.addEventListener('click', (e) => {
   liveCursorY = windowY + Math.round(e.clientY) + chromeOffset;
 }, { passive: true });
 
+// ── Bulk question scanner ─────────────────────────────────────────────
+// Polls /scan-request.  When a request arrives, scans every
+// div[data-question-id] on the page, gathering position, viewport
+// visibility, current checked/value state, and option labels.
+function pollForScanRequests() {
+  fetch('http://localhost:3004/scan-request')
+    .then(r => r.json())
+    .then(data => {
+      if (!data || !data.requestId) return;
+
+      const windowX = window.screenX || window.screenLeft || 0;
+      const windowY = window.screenY || window.screenTop || 0;
+      const chromeOffset = window.outerHeight - window.innerHeight;
+      const vH = window.innerHeight;
+      const vW = window.innerWidth;
+
+      const questions = [];
+      document.querySelectorAll('div[data-question-id]').forEach(qdiv => {
+        const uuid = qdiv.getAttribute('data-question-id');
+        if (!uuid) return;
+
+        const rect = qdiv.getBoundingClientRect();
+        const inViewport = rect.top >= -50 && rect.bottom <= vH + 50 && rect.width > 0;
+
+        // Determine question type and current state
+        const radios = qdiv.querySelectorAll('input[type="radio"]');
+        const checkboxes = qdiv.querySelectorAll('input[type="checkbox"]');
+        const textarea = qdiv.querySelector('textarea');
+        let qType = 'unknown';
+        let checkedLabel = null;
+        let value = '';
+        const labels = [];
+
+        if (radios.length > 0) {
+          qType = 'radio';
+          radios.forEach(r => {
+            const lbl = r.closest('label');
+            const labelText = lbl ? lbl.textContent.trim() : '';
+            labels.push(labelText);
+            if (r.checked) checkedLabel = labelText;
+          });
+        } else if (checkboxes.length > 0) {
+          qType = 'checkbox';
+          checkboxes.forEach(cb => {
+            const lbl = cb.closest('label');
+            const labelText = lbl ? lbl.textContent.trim() : '';
+            labels.push(labelText);
+            if (cb.checked) checkedLabel = labelText;
+          });
+        } else if (textarea) {
+          qType = 'textarea';
+          value = textarea.value || '';
+        }
+
+        // For visible elements, compute absolute click coordinates (center of the
+        // first radio/checkbox label, or center of textarea)
+        let absX = 0, absY = 0;
+        if (inViewport) {
+          let target = null;
+          if (radios.length > 0) {
+            // Use the first radio's label as reference point
+            const firstLabel = radios[0].closest('label');
+            target = firstLabel || radios[0];
+          } else if (checkboxes.length > 0) {
+            const firstLabel = checkboxes[0].closest('label');
+            target = firstLabel || checkboxes[0];
+          } else if (textarea) {
+            target = textarea;
+          }
+          if (target) {
+            const tRect = target.getBoundingClientRect();
+            absX = windowX + Math.round(tRect.left + tRect.width / 2);
+            absY = windowY + Math.round(tRect.top + tRect.height / 2) + chromeOffset;
+          }
+        }
+
+        questions.push({
+          uuid,
+          selector: `div[data-question-id="${uuid}"]`,
+          label: qdiv.getAttribute('data-label') || '',
+          type: qType,
+          inViewport,
+          checkedLabel,
+          value,
+          labels,
+          x: absX,
+          y: absY,
+          viewportTop: Math.round(rect.top),
+        });
+      });
+
+      fetch('http://localhost:3004/scan-response', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requestId: data.requestId,
+          questions,
+          total: questions.length,
+          visible: questions.filter(q => q.inViewport).length,
+          vpLeft: windowX,
+          vpTop: windowY + chromeOffset,
+          vpRight: windowX + vW,
+          vpBottom: windowY + chromeOffset + vH,
+          cursorX: liveCursorX,
+          cursorY: liveCursorY,
+        })
+      }).catch(() => {});
+    })
+    .catch(() => {});
+}
+
 setInterval(pollForCoordRequests, 300);
+setInterval(pollForScanRequests, 500);
+
+// ── DOM Change Logger ─────────────────────────────────────────────────
+// Watches all radio/checkbox inputs inside question divs and logs state
+// changes to console + POSTs to reading-behavior server for debugging.
+(function initDomChangeLogger() {
+  const qDivs = document.querySelectorAll('div[data-question-id]');
+  qDivs.forEach(qdiv => {
+    const uuid = qdiv.getAttribute('data-question-id');
+    const label = qdiv.getAttribute('data-label') || '?';
+    qdiv.querySelectorAll('input[type="radio"], input[type="checkbox"]').forEach(input => {
+      input.addEventListener('change', () => {
+        const lbl = input.closest('label');
+        const optText = lbl ? lbl.textContent.trim() : input.value;
+        const msg = `🔔 DOM: [${label}] ${input.type} → "${optText}" checked=${input.checked}`;
+        console.log(msg);
+        fetch('http://localhost:3004/dom-change', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid, label, type: input.type, option: optText, checked: input.checked, ts: Date.now() })
+        }).catch(() => {});
+      });
+    });
+    const ta = qdiv.querySelector('textarea');
+    if (ta) {
+      let debounce;
+      ta.addEventListener('input', () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+          const msg = `🔔 DOM: [${label}] textarea value="${ta.value.substring(0, 80)}..."`;
+          console.log(msg);
+          fetch('http://localhost:3004/dom-change', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uuid, label, type: 'textarea', value: ta.value.substring(0, 200), ts: Date.now() })
+          }).catch(() => {});
+        }, 300);
+      });
+    }
+  });
+  console.log(`🔔 DOM change logger active on ${qDivs.length} question divs`);
+})();
 
 // Press F to start queued automation
 window.addEventListener('keydown', (e) => {

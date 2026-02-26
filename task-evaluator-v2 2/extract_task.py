@@ -50,20 +50,39 @@ def extract_from_html(filepath: str) -> dict:
 
     # ── 2. QUESTIONS — generic extraction via data-label / data-question-id
     # Each question block: div[id^="question-"][data-question-id]
+    # IMPORTANT: Skip "ghost" divs that share the same id but have no
+    # data-question-id and no actual inputs (radio/checkbox/textarea).
     question_divs = soup.find_all('div', id=re.compile(r'^question-\d+'))
     for qdiv in question_divs:
         q_id = qdiv.get('data-question-id', '')
         q_label = qdiv.get('data-label', '')
         q_num = qdiv.get('id', '').replace('question-', '')
 
+        # Skip ghost divs: no data-question-id means no real inputs
+        if not q_id:
+            has_inputs = (qdiv.find('input', attrs={'type': 'radio'}) or
+                          qdiv.find('input', attrs={'type': 'checkbox'}) or
+                          qdiv.find('textarea') or
+                          qdiv.find('select'))
+            if not has_inputs:
+                continue
+
         # Get the question text from gondor-wysiwyg inside it
         q_text_el = qdiv.find(attrs={'data-testid': 'question-text'})
         q_text = q_text_el.get_text(separator='\n', strip=True) if q_text_el else ''
+
+        # Build a CSS selector that uniquely targets this question div.
+        # Prefer data-question-id UUID (globally unique), fall back to #id.
+        if q_id:
+            css_selector = f'div[data-question-id="{q_id}"]'
+        else:
+            css_selector = f'#question-{q_num}'
 
         question = {
             'number': q_num,
             'id': q_id,
             'label': q_label,
+            'selector': css_selector,
             'text': q_text[:2000],
             'type': 'unknown',
             'options': [],

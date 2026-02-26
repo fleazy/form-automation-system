@@ -17,6 +17,10 @@ class ReadingBehaviorSimulator {
         this.currentHovered = { id: '', name: '' };
         this.emergencyStop = false;
         this.isReading = false;
+        
+        // Scan-questions support: bulk query all question elements at once
+        this.pendingScanRequest = null;
+        this.scanResolvers = new Map();
         this.isScrollingBack = false;
         
         // Reading session state
@@ -32,6 +36,9 @@ class ReadingBehaviorSimulator {
         this.pendingCoordRequest = null;
         this.coordResolvers = new Map();
         this.pendingAutomationData = null;
+        // Viewport bounds reported by the extension (absolute screen coords).
+        // Updated from coord-response and cursor-position messages.
+        this.viewportBounds = null;
         
         process.on('SIGINT', () => {
             console.log('\n🛑 STOPPING READING SESSION!');
@@ -476,7 +483,31 @@ class ReadingBehaviorSimulator {
     // Move to absolute screen coordinates.
     // Extension gives us exact target + cursor coords. Step linearly toward
     // the target in small increments to stay below OS pointer acceleration.
+    // Clamps target to viewport bounds so the cursor never leaves the page.
     async moveToAbs(targetX, targetY, startPos = null) {
+        // Clamp target to viewport bounds (never click dock/menubar/off-page)
+        if (this.viewportBounds) {
+            const b = this.viewportBounds;
+            const MARGIN = 10; // stay 10px inside edges
+            targetX = Math.max(b.left + MARGIN, Math.min(b.right - MARGIN, targetX));
+            targetY = Math.max(b.top + MARGIN, Math.min(b.bottom - MARGIN, targetY));
+        } else {
+            console.log(`   ⚠️  no viewport bounds yet — waiting for extension report...`);
+            // Wait up to 2s for bounds to arrive from extension
+            for (let i = 0; i < 20 && !this.viewportBounds; i++) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            if (this.viewportBounds) {
+                const b = this.viewportBounds;
+                const MARGIN = 10;
+                targetX = Math.max(b.left + MARGIN, Math.min(b.right - MARGIN, targetX));
+                targetY = Math.max(b.top + MARGIN, Math.min(b.bottom - MARGIN, targetY));
+            } else {
+                console.log(`   ⚠️  still no bounds — REFUSING to move (would risk clicking dock/menubar)`);
+                return;
+            }
+        }
+
         let from;
         if (startPos !== null && typeof startPos.x === 'number' && typeof startPos.y === 'number') {
             from = { x: startPos.x, y: startPos.y };
@@ -498,8 +529,15 @@ class ReadingBehaviorSimulator {
         // Overshoot: move a few px past target in the direction of travel, then pull back
         const overshootMag = (dist > 20) ? (5 + Math.random() * 14) : 0;
         const len = Math.max(dist, 1);
-        const overshootX = Math.round(targetX + (dx / len) * overshootMag);
-        const overshootY = Math.round(targetY + (dy / len) * overshootMag);
+        let overshootX = Math.round(targetX + (dx / len) * overshootMag);
+        let overshootY = Math.round(targetY + (dy / len) * overshootMag);
+        // Clamp overshoot to viewport bounds too
+        if (this.viewportBounds) {
+            const b = this.viewportBounds;
+            const MARGIN = 5;
+            overshootX = Math.max(b.left + MARGIN, Math.min(b.right - MARGIN, overshootX));
+            overshootY = Math.max(b.top + MARGIN, Math.min(b.bottom - MARGIN, overshootY));
+        }
         const fullDx = overshootX - from.x;
         const fullDy = overshootY - from.y;
         const fullDist = Math.sqrt(fullDx * fullDx + fullDy * fullDy);
@@ -635,6 +673,23 @@ class ReadingBehaviorSimulator {
 
     // Ask content.js for the current screen coordinates of an element.
     // content.js polls /coord-request, scrolls the element into view,
+    // Bulk-scan all question elements on the page. The extension polls
+    // /scan-request, runs the scan, and posts back to /scan-response.
+    scanQuestions() {
+        return new Promise((resolve, reject) => {
+            const requestId = 'scan-' + Date.now();
+            this.pendingScanRequest = { requestId };
+            this.scanResolvers.set(requestId, resolve);
+            setTimeout(() => {
+                if (this.scanResolvers.has(requestId)) {
+                    this.scanResolvers.delete(requestId);
+                    this.pendingScanRequest = null;
+                    reject(new Error('Scan request timed out'));
+                }
+            }, 10000); // 10s — scanning many elements takes time
+        });
+    }
+
     // and posts back to /coord-response with fresh coords.
     getLiveCoords(selector, { labelText } = {}) {
         return new Promise((resolve, reject) => {
@@ -702,6 +757,27 @@ class ReadingBehaviorSimulator {
                 this.pendingAutomationData = null;
                 res.writeHead(200);
                 res.end('OK');
+            } else if (req.method === 'POST' && req.url === '/dom-change') {
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', () => {
+                    try {
+                        const d = JSON.parse(body);
+                        console.log(`🔔 DOM change: [${d.label}] ${d.type} → "${d.option || d.value || ''}" checked=${d.checked}`);
+                    } catch (_) {}
+                    res.writeHead(200);
+                    res.end('OK');
+                });
+            } else if (req.method === 'POST' && req.url === '/trigger-scan') {
+                // Trigger a bulk scan and return the results synchronously
+                this.scanQuestions().then(result => {
+                    res.setHeader('Content-Type', 'application/json');
+                    res.writeHead(200);
+                    res.end(JSON.stringify(result));
+                }).catch(err => {
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: err.message }));
+                });
             } else if (req.method === 'POST' && req.url === '/test-move') {
                 // Delayed test so you can run curl then switch to the browser.
                 // Body: { "delay": 4000, "moves": [[x1,y1],[x2,y2],...] }
@@ -743,6 +819,13 @@ class ReadingBehaviorSimulator {
                             this.currentPosition = { x: data.x, y: data.y };
                             this.currentHovered = { id: data.hoveredId || '', name: data.hoveredName || '' };
                         }
+                        // Update viewport bounds if the extension sent them
+                        if (data.vpLeft !== undefined) {
+                            this.viewportBounds = {
+                                left: data.vpLeft, top: data.vpTop,
+                                right: data.vpRight, bottom: data.vpBottom
+                            };
+                        }
                     } catch (_) {}
                     res.writeHead(200);
                     res.end('OK');
@@ -773,6 +856,13 @@ class ReadingBehaviorSimulator {
                         if (resolve) {
                             this.coordResolvers.delete(data.requestId);
                             this.pendingCoordRequest = null;
+                            // Update viewport bounds from coord-response (most reliable source)
+                            if (data.vpLeft !== undefined) {
+                                this.viewportBounds = {
+                                    left: data.vpLeft, top: data.vpTop,
+                                    right: data.vpRight, bottom: data.vpBottom
+                                };
+                            }
                             resolve(data);
                         }
                         res.writeHead(200);
@@ -781,6 +871,53 @@ class ReadingBehaviorSimulator {
                         res.writeHead(400);
                         res.end('Invalid JSON');
                     }
+                });
+            } else if (req.method === 'GET' && req.url === '/scan-request') {
+                // Extension polls this to check for pending scan requests
+                res.setHeader('Content-Type', 'application/json');
+                res.writeHead(200);
+                res.end(JSON.stringify(this.pendingScanRequest || {}));
+            } else if (req.method === 'POST' && req.url === '/scan-response') {
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', () => {
+                    try {
+                        const data = JSON.parse(body);
+                        const resolve = this.scanResolvers.get(data.requestId);
+                        if (resolve) {
+                            this.scanResolvers.delete(data.requestId);
+                            this.pendingScanRequest = null;
+                            // Update viewport bounds if present
+                            if (data.vpLeft !== undefined) {
+                                this.viewportBounds = {
+                                    left: data.vpLeft, top: data.vpTop,
+                                    right: data.vpRight, bottom: data.vpBottom
+                                };
+                            }
+                            resolve(data);
+                        }
+                        res.writeHead(200);
+                        res.end('OK');
+                    } catch (e) {
+                        res.writeHead(400);
+                        res.end('Invalid JSON');
+                    }
+                });
+            } else if (req.method === 'POST' && req.url === '/dom-change') {
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', () => {
+                    try {
+                        const data = JSON.parse(body);
+                        const ts = new Date(data.timestamp).toLocaleTimeString();
+                        if (data.type === 'textarea') {
+                            console.log(`📝 [${ts}] DOM: [${data.questionLabel}] textarea len=${data.valueLength}`);
+                        } else {
+                            console.log(`📝 [${ts}] DOM: [${data.questionLabel}] ${data.type} → "${data.labelText}" checked=${data.checked}`);
+                        }
+                    } catch (_) {}
+                    res.writeHead(200);
+                    res.end('OK');
                 });
             } else if (req.method === 'POST' && req.url === '/form-fields') {
                 let body = '';
@@ -941,150 +1078,236 @@ window.addEventListener('keydown', function(e) {
                 await new Promise(resolve => setTimeout(resolve, delayMs));
 
             // FILL_FIELD,selector,text — live coord lookup + move + click + type
+            // Strict verify-before-proceed: will not advance until the field
+            // is confirmed in-view, focused, and contains the expected value.
             } else if (command.startsWith('FILL_FIELD,')) {
                 const parts = command.split(',');
                 const selector = parts[1];
                 const text = parts.slice(2).join(',');
                 console.log(`📝 FILL_FIELD: "${selector}" → "${text}"`);
-                try {
-                    // 1. Get live coords + current DOM state
-                    let coords = await this.getLiveCoords(selector);
-                    if (!coords.found) throw new Error('Element not found');
-
-                    // 2. Scroll into view via Pico if needed (feedback loop)
-                    if (!coords.inViewport) {
-                        coords = await this.scrollToElement(selector);
-                        if (!coords.found) throw new Error('Element lost during scroll');
-                    }
-                    const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
-
-                    // 3. Move and click
-                    await this.moveToAbs(coords.x, coords.y, cursorStart);
-                    await this.sendCommand('CLICK');
-                    await new Promise(r => setTimeout(r, 200));
-
-                    // 4. Verify focus via DOM (document.activeElement === el)
-                    //    Retry once with fresh coords if click missed
+                const MAX_RETRIES = 4;
+                let filled = false;
+                for (let attempt = 0; attempt < MAX_RETRIES && !filled; attempt++) {
+                    if (this.emergencyStop) break;
                     try {
-                        const afterClick = await this.getLiveCoords(selector);
-                        if (afterClick.found && !afterClick.focused) {
-                            console.log(`   ⚠️  not focused after click — re-centering and retrying`);
-                            const cs = (typeof afterClick.cursorX === 'number')
-                                ? { x: afterClick.cursorX, y: afterClick.cursorY } : null;
-                            await this.moveToAbs(afterClick.x, afterClick.y, cs);
+                        // 1. Get live coords
+                        let coords = await this.getLiveCoords(selector);
+                        if (!coords.found) throw new Error('Element not found');
+
+                        // 2. Scroll into view if needed — loop until confirmed in viewport
+                        if (!coords.inViewport) {
+                            coords = await this.scrollToElement(selector);
+                            if (!coords.found) throw new Error('Element lost during scroll');
+                        }
+                        // Double-check it's really in view
+                        coords = await this.getLiveCoords(selector);
+                        if (!coords.found) throw new Error('Element not found after scroll');
+                        if (!coords.inViewport) {
+                            console.log(`   ⚠️  still not in viewport after scroll (attempt ${attempt + 1})`);
+                            continue; // retry from top
+                        }
+
+                        const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
+
+                        // 3. Move and click
+                        await this.moveToAbs(coords.x, coords.y, cursorStart);
+                        await this.sendCommand('CLICK');
+                        await new Promise(r => setTimeout(r, 250));
+
+                        // 4. Verify focus — retry click if not focused
+                        let focusCheck = await this.getLiveCoords(selector);
+                        if (focusCheck.found && !focusCheck.focused) {
+                            console.log(`   ⚠️  not focused — retrying click (attempt ${attempt + 1})`);
+                            const cs = (typeof focusCheck.cursorX === 'number') ? { x: focusCheck.cursorX, y: focusCheck.cursorY } : null;
+                            await this.moveToAbs(focusCheck.x, focusCheck.y, cs);
                             await this.sendCommand('CLICK');
-                            await new Promise(r => setTimeout(r, 150));
-                        } else if (afterClick.focused) {
-                            console.log(`   ✅ field focused`);
+                            await new Promise(r => setTimeout(r, 250));
+                            focusCheck = await this.getLiveCoords(selector);
+                            if (focusCheck.found && !focusCheck.focused) {
+                                console.log(`   ⚠️  still not focused after retry`);
+                                continue; // retry from top
+                            }
                         }
-                    } catch (_) {
-                        console.log(`   ⚠️  focus check timed out — continuing`);
-                    }
 
-                    // 4. Type text
-                    for (const char of text) {
-                        await this.sendCommand(`TYPE,${char}`);
-                        await new Promise(resolve => setTimeout(resolve, 60 + Math.random() * 40));
-                    }
+                        // 5. Clear existing text and type new text
+                        // Select all first to replace any existing content
+                        await this.sendCommand('COMBO,ctrl+a');
+                        await new Promise(r => setTimeout(r, 100));
+                        for (const char of text) {
+                            await this.sendCommand(`TYPE,${char}`);
+                            await new Promise(resolve => setTimeout(resolve, 60 + Math.random() * 40));
+                        }
+                        await new Promise(r => setTimeout(r, 200));
 
-                    // 5. Verify value via DOM (best-effort, non-blocking)
-                    try {
+                        // 6. Verify the value was set
                         const afterType = await this.getLiveCoords(selector);
-                        if (afterType.found) {
-                            console.log(`   ${afterType.value ? '✅' : '⚠️ '} value: "${afterType.value}"`);
+                        if (afterType.found && afterType.value) {
+                            // Check if at least the start of the text matches
+                            const got = afterType.value.trim().toLowerCase();
+                            const want = text.trim().toLowerCase();
+                            if (got.startsWith(want.substring(0, 20)) || want.startsWith(got.substring(0, 20))) {
+                                console.log(`   ✅ value confirmed (${afterType.value.length} chars)`);
+                                filled = true;
+                            } else {
+                                console.log(`   ⚠️  value mismatch — got "${got.substring(0, 40)}..." (attempt ${attempt + 1})`);
+                            }
+                        } else {
+                            console.log(`   ⚠️  could not read value back (attempt ${attempt + 1})`);
+                            // Don't assume success — retry
                         }
-                    } catch (_) {}
-                } catch (err) {
-                    console.error(`   ❌ FILL_FIELD failed: ${err.message}`);
+                    } catch (err) {
+                        console.error(`   ❌ FILL_FIELD attempt ${attempt + 1} failed: ${err.message}`);
+                        await new Promise(r => setTimeout(r, 500));
+                    }
+                }
+                if (!filled) {
+                    console.error(`   ❌ FILL_FIELD FAILED after ${MAX_RETRIES} attempts: "${selector}"`);
+                    console.error(`   🛑 HALTING automation — cannot proceed with unverified state`);
+                    this.isAutomating = false;
+                    return; // STOP — do not advance to next command
                 }
 
             // CLICK_SELECTOR,selector — live coord lookup + move + click
+            // Strict verify-before-proceed for checkboxes.
             } else if (command.startsWith('CLICK_SELECTOR,')) {
                 const selector = command.split(',').slice(1).join(',');
                 console.log(`🖱️  CLICK_SELECTOR: "${selector}"`);
-                try {
-                    // 1. Get live coords + current DOM state
-                    let coords = await this.getLiveCoords(selector);
-                    if (!coords.found) throw new Error('Element not found');
+                const MAX_RETRIES = 4;
+                let confirmed = false;
+                for (let attempt = 0; attempt < MAX_RETRIES && !confirmed; attempt++) {
+                    if (this.emergencyStop) break;
+                    try {
+                        let coords = await this.getLiveCoords(selector);
+                        if (!coords.found) throw new Error('Element not found');
+                        const prevChecked = coords.checked;
 
-                    // 2. Scroll into view via Pico if needed (feedback loop)
-                    if (!coords.inViewport) {
-                        coords = await this.scrollToElement(selector);
-                        if (!coords.found) throw new Error('Element lost during scroll');
-                    }
-                    const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
-
-                    // 3. Move and click
-                    await this.moveToAbs(coords.x, coords.y, cursorStart);
-                    await this.sendCommand('CLICK');
-                    await new Promise(r => setTimeout(r, 200));
-
-                    // 4. Verify via DOM state — for checkboxes check el.checked toggled
-                    if (coords.checked !== null) {
-                        try {
-                            const check = await this.getLiveCoords(selector);
-                            if (check.found && check.checked === coords.checked) {
-                                console.log(`   ⚠️  checkbox unchanged — re-centering and retrying`);
-                                const cs = (typeof check.cursorX === 'number')
-                                    ? { x: check.cursorX, y: check.cursorY } : null;
-                                await this.moveToAbs(check.x, check.y, cs);
-                                await this.sendCommand('CLICK');
-                                await new Promise(r => setTimeout(r, 150));
-                            } else if (check.found) {
-                                console.log(`   ✅ checkbox → ${check.checked}`);
-                            }
-                        } catch (_) {
-                            console.log(`   ⚠️  checkbox verify timed out`);
+                        if (!coords.inViewport) {
+                            coords = await this.scrollToElement(selector);
+                            if (!coords.found) throw new Error('Element lost during scroll');
                         }
+                        // Confirm in view
+                        coords = await this.getLiveCoords(selector);
+                        if (!coords.found) throw new Error('Element not found after scroll');
+                        if (!coords.inViewport) {
+                            console.log(`   ⚠️  still not in viewport (attempt ${attempt + 1})`);
+                            continue;
+                        }
+
+                        const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
+                        await this.moveToAbs(coords.x, coords.y, cursorStart);
+                        await this.sendCommand('CLICK');
+                        await new Promise(r => setTimeout(r, 200));
+
+                        // Verify for checkboxes
+                        if (prevChecked !== null) {
+                            const check = await this.getLiveCoords(selector);
+                            if (check.found && check.checked !== prevChecked) {
+                                console.log(`   ✅ checkbox → ${check.checked}`);
+                                confirmed = true;
+                            } else if (check.found) {
+                                console.log(`   ⚠️  checkbox unchanged (attempt ${attempt + 1})`);
+                            }
+                        } else {
+                            console.log(`   ✅ clicked`);
+                            confirmed = true;
+                        }
+                    } catch (err) {
+                        console.error(`   ❌ CLICK_SELECTOR attempt ${attempt + 1} failed: ${err.message}`);
+                        await new Promise(r => setTimeout(r, 500));
                     }
-                } catch (err) {
-                    console.error(`   ❌ CLICK_SELECTOR failed: ${err.message}`);
+                }
+                if (!confirmed) {
+                    console.error(`   ❌ CLICK_SELECTOR FAILED after ${MAX_RETRIES} attempts: "${selector}"`);
+                    console.error(`   🛑 HALTING automation — cannot proceed with unverified state`);
+                    this.isAutomating = false;
+                    return;
                 }
 
             // CLICK_OPTION,#question-N,label text — finds radio/checkbox by label text
+            // Strict verify-before-proceed: will not advance until the option's
+            // checked state has actually changed in the DOM.
             } else if (command.startsWith('CLICK_OPTION,')) {
                 const parts = command.split(',');
                 const containerSelector = parts[1];
                 const labelText = parts.slice(2).join(',');
                 console.log(`🖱️  CLICK_OPTION: "${containerSelector}" → "${labelText}"`);
-                try {
-                    let coords = await this.getLiveCoords(containerSelector, { labelText });
-                    if (!coords.found) throw new Error(`Label "${labelText}" not found in ${containerSelector}`);
 
-                    // Scroll into view via Pico if needed (feedback loop)
-                    if (!coords.inViewport) {
-                        coords = await this.scrollToElement(containerSelector, { labelText });
-                        if (!coords.found) throw new Error('Element lost during scroll');
+                // Pre-check: if the target option is ALREADY checked, skip it
+                try {
+                    const preCheck = await this.getLiveCoords(containerSelector, { labelText });
+                    if (preCheck.found && preCheck.checked === true) {
+                        console.log(`   ✅ already checked — skipping`);
+                        continue; // next command in the queue
                     }
-                    const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
-                    await this.moveToAbs(coords.x, coords.y, cursorStart);
-                    await this.sendCommand('CLICK');
-                    await new Promise(r => setTimeout(r, 350));
-                    if (coords.checked !== null) {
-                        try {
-                            const check = await this.getLiveCoords(containerSelector, { labelText });
-                            if (check.found && check.checked === coords.checked) {
-                                console.log(`   ⚠️  state unchanged — retrying`);
-                                const cs = (typeof check.cursorX === 'number') ? { x: check.cursorX, y: check.cursorY } : null;
-                                await this.moveToAbs(check.x, check.y, cs);
-                                await this.sendCommand('CLICK');
-                                await new Promise(r => setTimeout(r, 350));
-                                // Verify retry worked
-                                const check2 = await this.getLiveCoords(containerSelector, { labelText });
-                                if (check2.found && check2.checked === coords.checked) {
-                                    console.log(`   ❌ still unchanged after retry`);
-                                } else {
-                                    console.log(`   ✅ retry succeeded → ${check2.checked}`);
-                                }
-                            } else if (check.found) {
-                                console.log(`   ✅ checked → ${check.checked}`);
+                } catch (_) {} // if pre-check fails, proceed with normal retry loop
+
+                const MAX_RETRIES = 6;
+                let confirmed = false;
+                for (let attempt = 0; attempt < MAX_RETRIES && !confirmed; attempt++) {
+                    if (this.emergencyStop) break;
+                    try {
+                        // 1. Get live coords for this label within the container
+                        let coords = await this.getLiveCoords(containerSelector, { labelText });
+                        if (!coords.found) throw new Error(`Label "${labelText}" not found in ${containerSelector}`);
+
+                        const prevChecked = coords.checked;
+
+                        // 2. Scroll into view — loop until confirmed in viewport
+                        if (!coords.inViewport) {
+                            coords = await this.scrollToElement(containerSelector, { labelText });
+                            if (!coords.found) throw new Error('Element lost during scroll');
+                        }
+                        // Double-check it's in view
+                        coords = await this.getLiveCoords(containerSelector, { labelText });
+                        if (!coords.found) throw new Error('Element not found after scroll');
+                        if (!coords.inViewport) {
+                            console.log(`   ⚠️  still not in viewport (attempt ${attempt + 1})`);
+                            continue;
+                        }
+
+                        // 3. Move and click
+                        const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
+                        console.log(`   → move to (${Math.round(coords.x)}, ${Math.round(coords.y)}) [attempt ${attempt + 1}]`);
+                        await this.moveToAbs(coords.x, coords.y, cursorStart);
+                        await this.sendCommand('CLICK');
+                        await new Promise(r => setTimeout(r, 500)); // 500ms settle for React re-render
+
+                        // 4. Verify state changed
+                        const check = await this.getLiveCoords(containerSelector, { labelText });
+                        if (!check.found) {
+                            console.log(`   ⚠️  element not found for verify — DOM may be re-rendering (attempt ${attempt + 1})`);
+                            await new Promise(r => setTimeout(r, 500)); // extra wait for DOM settle
+                            continue;
+                        }
+
+                        if (check.checked !== null) {
+                            // Radio/checkbox — checked state should have changed
+                            if (check.checked === true) {
+                                console.log(`   ✅ confirmed checked`);
+                                confirmed = true;
+                            } else if (check.checked === prevChecked) {
+                                console.log(`   ⚠️  state unchanged (still ${check.checked}) — retrying (attempt ${attempt + 1})`);
+                                // Try clicking with slightly offset coords in case we missed
+                                await new Promise(r => setTimeout(r, 200));
+                            } else {
+                                console.log(`   ✅ state changed → ${check.checked}`);
+                                confirmed = true;
                             }
-                        } catch (_) { console.log(`   ⚠️  verify timed out`); }
-                    } else {
-                        console.log(`   ✅ clicked`);
+                        } else {
+                            // No checked state to verify (might be a custom element)
+                            console.log(`   ✅ clicked (no checked state to verify)`);
+                            confirmed = true;
+                        }
+                    } catch (err) {
+                        console.error(`   ❌ CLICK_OPTION attempt ${attempt + 1} failed: ${err.message}`);
+                        await new Promise(r => setTimeout(r, 500));
                     }
-                } catch (err) {
-                    console.error(`   ❌ CLICK_OPTION failed: ${err.message}`);
+                }
+                if (!confirmed) {
+                    console.error(`   ❌ CLICK_OPTION FAILED after ${MAX_RETRIES} attempts: "${containerSelector}" → "${labelText}"`);
+                    console.error(`   🛑 HALTING automation — cannot proceed with unverified state`);
+                    this.isAutomating = false;
+                    return; // STOP — do not advance to next command
                 }
 
             } else {
