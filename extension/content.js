@@ -243,15 +243,35 @@ function pollForCoordRequests() {
         const windowY = window.screenY || window.screenTop || 0;
         const chromeOffset = window.outerHeight - window.innerHeight;
         const vH = window.innerHeight;
-        const inViewport = rect.top >= 0 && rect.bottom <= vH && rect.width > 0;
+        // Safe zone: well below sticky banner, well above bottom edge
+        const BANNER_H = 100;
+        const BOTTOM_M = 80;
+        const inViewport = rect.top >= BANNER_H && rect.bottom <= (vH - BOTTOM_M) && rect.width > 0;
 
         const absX = windowX + Math.round(rect.left + rect.width / 2);
         const absY = windowY + Math.round(rect.top + rect.height / 2) + chromeOffset;
         console.log(`📍 coord-response: sel="${data.selector?.substring(0,30)}" label="${data.labelText||''}" → clickTarget=${clickTarget.tagName} rect=(${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)}x${Math.round(rect.height)}) abs=(${absX},${absY}) cursor=(${liveCursorX},${liveCursorY}) checked=${el.checked} inView=${inViewport} winPos=(${windowX},${windowY}) chrome=${chromeOffset}`);
-        // Exact pixel delta that scrollIntoView({block:'center'}) would scroll
-        const elementAbsTop = rect.top + window.scrollY;
-        const targetScrollY = elementAbsTop + rect.height / 2 - vH / 2;
-        const scrollDeltaNeeded = Math.round(targetScrollY - window.scrollY);
+        // Scroll target: aim for middle zone, away from edges
+        const targetY = vH * (0.4 + Math.random() * 0.15); // 40-55% of viewport
+        const elementCenter = rect.top + rect.height / 2;
+        const scrollDeltaNeeded = Math.round(elementCenter - targetY);
+
+        // Check what's actually under the cursor right now (for hover verification)
+        const cursorClientX = liveCursorX - windowX;
+        const cursorClientY = liveCursorY - windowY - chromeOffset;
+        let hoveredLabelText = '';
+        if (cursorClientX > 0 && cursorClientY > 0) {
+            const hovered = document.elementFromPoint(cursorClientX, cursorClientY);
+            if (hovered) {
+                const parentLabel = hovered.closest('label');
+                if (parentLabel) {
+                    hoveredLabelText = parentLabel.textContent.trim();
+                } else if (hovered.tagName === 'LABEL') {
+                    hoveredLabelText = hovered.textContent.trim();
+                }
+            }
+        }
+
         fetch('http://localhost:3004/coord-response', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -272,6 +292,7 @@ function pollForCoordRequests() {
             viewportTop: Math.round(rect.top),
             viewportH: Math.round(vH),
             scrollDeltaNeeded,
+            hoveredLabelText,
             vpLeft: windowX,
             vpTop: windowY + chromeOffset,
             vpRight: windowX + window.innerWidth,
@@ -374,7 +395,7 @@ function pollForScanRequests() {
         if (!uuid) return;
 
         const rect = qdiv.getBoundingClientRect();
-        const inViewport = rect.top >= -50 && rect.bottom <= vH + 50 && rect.width > 0;
+        const inViewport = rect.top >= 180 && rect.bottom <= vH - 150 && rect.width > 0;
 
         // Determine question type and current state
         const radios = qdiv.querySelectorAll('input[type="radio"]');

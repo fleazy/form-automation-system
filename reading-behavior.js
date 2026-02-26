@@ -1,7 +1,7 @@
 const { SerialPort } = require('serialport');
 const { ReadlineParser } = require('@serialport/parser-readline');
 const http = require('http');
-// ghost-cursor kept for potential future use; movement now uses humanPath()
+const { path: ghostPath } = require('ghost-cursor');
 
 class ReadingBehaviorSimulator {
     constructor(portPath) {
@@ -482,154 +482,214 @@ class ReadingBehaviorSimulator {
     
     // Move to absolute screen coordinates.
     // Extension gives us exact target + cursor coords. Step linearly toward
-    // the target in small increments to stay below OS pointer acceleration.
-    // Clamps target to viewport bounds so the cursor never leaves the page.
+    // Uses ghost-cursor Bezier paths for natural curved movement.
     async moveToAbs(targetX, targetY, startPos = null, opts = {}) {
-        // Clamp target to viewport bounds (never click dock/menubar/off-page)
-        if (this.viewportBounds) {
-            const b = this.viewportBounds;
-            const MARGIN = 10; // stay 10px inside edges
-            targetX = Math.max(b.left + MARGIN, Math.min(b.right - MARGIN, targetX));
-            targetY = Math.max(b.top + MARGIN, Math.min(b.bottom - MARGIN, targetY));
-        } else {
-            console.log(`   ⚠️  no viewport bounds yet — waiting for extension report...`);
-            // Wait up to 2s for bounds to arrive from extension
-            for (let i = 0; i < 20 && !this.viewportBounds; i++) {
+        // Clamp target to viewport bounds
+        if (!this.viewportBounds) {
+            for (let i = 0; i < 20 && !this.viewportBounds; i++)
                 await new Promise(r => setTimeout(r, 100));
-            }
-            if (this.viewportBounds) {
-                const b = this.viewportBounds;
-                const MARGIN = 10;
-                targetX = Math.max(b.left + MARGIN, Math.min(b.right - MARGIN, targetX));
-                targetY = Math.max(b.top + MARGIN, Math.min(b.bottom - MARGIN, targetY));
-            } else {
-                console.log(`   ⚠️  still no bounds — REFUSING to move (would risk clicking dock/menubar)`);
-                return;
-            }
+            if (!this.viewportBounds) { console.log(`   ⚠️  no viewport bounds`); return; }
         }
+        const b = this.viewportBounds;
+        const M = 20;
+        targetX = Math.max(b.left + M, Math.min(b.right - M, targetX));
+        targetY = Math.max(b.top + M, Math.min(b.bottom - M, targetY));
 
         let from;
-        if (startPos !== null && typeof startPos.x === 'number' && typeof startPos.y === 'number') {
+        if (startPos !== null && typeof startPos.x === 'number') {
             from = { x: startPos.x, y: startPos.y };
         } else {
-            await new Promise(r => setTimeout(r, 200));
+            await new Promise(r => setTimeout(r, 80));
             from = { ...this.currentPosition };
         }
+        // Also clamp from to viewport (it might be stale/wrong)
+        from.x = Math.max(b.left + M, Math.min(b.right - M, from.x));
+        from.y = Math.max(b.top + M, Math.min(b.bottom - M, from.y));
 
-        const dx = targetX - from.x;
-        const dy = targetY - from.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
+        const dist = Math.sqrt((targetX - from.x) ** 2 + (targetY - from.y) ** 2);
         console.log(`🖱️  move: (${Math.round(from.x)},${Math.round(from.y)}) → (${targetX},${targetY})  dist=${Math.round(dist)}px`);
+        if (dist < 3) { this.currentPosition = { x: targetX, y: targetY }; return; }
 
-        if (dist < 3) {
-            this.currentPosition = { x: targetX, y: targetY };
-            return;
+        let points;
+        if (dist < 80) {
+            // Short distance: mostly straight with tiny random drift
+            const steps = Math.max(8, Math.round(dist / 3));
+            points = [];
+            // Pick a small random perpendicular offset (1-3px) for subtle curve
+            const perpAmt = (1 + Math.random() * 2) * (Math.random() > 0.5 ? 1 : -1);
+            const dx = targetX - from.x, dy = targetY - from.y;
+            const perpX = -dy / dist, perpY = dx / dist; // unit perpendicular
+            for (let i = 0; i <= steps; i++) {
+                const t = i / steps;
+                // Parabolic bulge: peaks at t=0.5
+                const bulge = perpAmt * 4 * t * (1 - t);
+                points.push({
+                    x: from.x + dx * t + perpX * bulge,
+                    y: from.y + dy * t + perpY * bulge
+                });
+            }
+        } else {
+            // Long distance: ghost-cursor with very subtle arc
+            const spread = Math.min(dist * 0.01, 8);
+            points = ghostPath(from, { x: targetX, y: targetY }, { spreadOverride: spread });
         }
 
-        // Overshoot: move a few px past target in the direction of travel, then pull back
-        // Disabled when noOvershoot is set (for precision automation clicks)
-        const overshootMag = (!opts.noOvershoot && dist > 20) ? (5 + Math.random() * 14) : 0;
-        const len = Math.max(dist, 1);
-        let overshootX = Math.round(targetX + (dx / len) * overshootMag);
-        let overshootY = Math.round(targetY + (dy / len) * overshootMag);
-        // Clamp overshoot to viewport bounds too
-        if (this.viewportBounds) {
-            const b = this.viewportBounds;
-            const MARGIN = 5;
-            overshootX = Math.max(b.left + MARGIN, Math.min(b.right - MARGIN, overshootX));
-            overshootY = Math.max(b.top + MARGIN, Math.min(b.bottom - MARGIN, overshootY));
+        // Clamp every point to stay inside Chrome
+        for (const p of points) {
+            p.x = Math.max(b.left + M, Math.min(b.right - M, p.x));
+            p.y = Math.max(b.top + M, Math.min(b.bottom - M, p.y));
         }
-        const fullDx = overshootX - from.x;
-        const fullDy = overshootY - from.y;
-        const fullDist = Math.sqrt(fullDx * fullDx + fullDy * fullDy);
 
-        const STEP = 15; // px per step — no pointer acceleration, go fast
-        const steps = Math.ceil(fullDist / STEP);
-        let sentX = 0, sentY = 0;
+        // Send relative moves — break into small steps to avoid pointer acceleration
+        // Each MOVE delta must stay under ~8px per axis to minimize macOS acceleration
+        const MAX_STEP = 8;
+        const skip = dist > 300 ? 3 : dist > 100 ? 2 : 1;
+        let lastX = Math.round(from.x);
+        let lastY = Math.round(from.y);
 
-        for (let i = 1; i <= steps; i++) {
+        for (let i = skip; i < points.length; i += skip) {
             if (this.emergencyStop) break;
-            const wantX = Math.round(fullDx * i / steps);
-            const wantY = Math.round(fullDy * i / steps);
-            let sdx = wantX - sentX;
-            let sdy = wantY - sentY;
-            // Occasional ±1px jitter so the path isn't a perfectly straight line
-            if (Math.random() < 0.15) sdx += Math.random() < 0.5 ? -1 : 1;
-            if (sdx !== 0 || sdy !== 0) {
-                this.port.write(`MOVE,${sdx},${sdy}\r\n`);
-                sentX = wantX;
-                sentY = wantY;
-            }
-            await new Promise(r => setTimeout(r, 8 + Math.round(Math.random() * 3)));
-        }
+            const px = Math.max(b.left + M, Math.min(b.right - M, Math.round(points[i].x)));
+            const py = Math.max(b.top + M, Math.min(b.bottom - M, Math.round(points[i].y)));
+            let dx = px - lastX;
+            let dy = py - lastY;
+            if (dx === 0 && dy === 0) continue;
 
-        // Pause at overshoot, then pull back to actual target
-        if (overshootMag > 0) {
-            await new Promise(r => setTimeout(r, 25 + Math.round(Math.random() * 45)));
-            const backDx = targetX - overshootX;
-            const backDy = targetY - overshootY;
-            const backSteps = Math.max(1, Math.ceil(Math.sqrt(backDx * backDx + backDy * backDy)));
-            let bSentX = 0, bSentY = 0;
-            for (let s = 1; s <= backSteps; s++) {
-                if (this.emergencyStop) break;
-                const wbx = Math.round(backDx * s / backSteps) - bSentX;
-                const wby = Math.round(backDy * s / backSteps) - bSentY;
-                if (wbx !== 0 || wby !== 0) {
-                    this.port.write(`MOVE,${wbx},${wby}\r\n`);
-                    bSentX += wbx; bSentY += wby;
+            // If delta is too big, break into sub-steps
+            const maxAbs = Math.max(Math.abs(dx), Math.abs(dy));
+            if (maxAbs > MAX_STEP) {
+                const subs = Math.ceil(maxAbs / MAX_STEP);
+                for (let s = 1; s <= subs; s++) {
+                    const sdx = Math.round(dx * s / subs) - Math.round(dx * (s - 1) / subs);
+                    const sdy = Math.round(dy * s / subs) - Math.round(dy * (s - 1) / subs);
+                    if (sdx !== 0 || sdy !== 0) this.port.write(`MOVE,${sdx},${sdy}\r\n`);
+                    await new Promise(r => setTimeout(r, 3));
                 }
-                await new Promise(r => setTimeout(r, 12 + Math.round(Math.random() * 8)));
+            } else {
+                this.port.write(`MOVE,${dx},${dy}\r\n`);
             }
+            lastX = px;
+            lastY = py;
+            await new Promise(r => setTimeout(r, 3 + Math.round(Math.random() * 2)));
         }
 
-        // Brief settle for browser mousemove events
+        // Land on final point
+        const fp = points[points.length - 1];
+        const fdx = Math.round(Math.max(b.left + M, Math.min(b.right - M, fp.x))) - lastX;
+        const fdy = Math.round(Math.max(b.top + M, Math.min(b.bottom - M, fp.y))) - lastY;
+        if (fdx !== 0 || fdy !== 0) this.port.write(`MOVE,${fdx},${fdy}\r\n`);
+
         await new Promise(r => setTimeout(r, 80));
 
+        // If drifted, do ONE ghost-cursor correction move — not tiny increments
         const errX = targetX - this.currentPosition.x;
         const errY = targetY - this.currentPosition.y;
         const errDist = Math.sqrt(errX * errX + errY * errY);
-        if (errDist > 5) {
-            console.log(`   ⚠️  landed at (${Math.round(this.currentPosition.x)},${Math.round(this.currentPosition.y)}) — correcting ${errDist.toFixed(1)}px`);
-            const csteps = Math.max(1, Math.ceil(errDist / 2));
-            for (let s = 1; s <= csteps; s++) {
-                if (this.emergencyStop) break;
-                const rdx = Math.round(errX * s / csteps) - Math.round(errX * (s - 1) / csteps);
-                const rdy = Math.round(errY * s / csteps) - Math.round(errY * (s - 1) / csteps);
-                if (rdx !== 0 || rdy !== 0) {
-                    this.port.write(`MOVE,${rdx},${rdy}\r\n`);
-                    await new Promise(r => setTimeout(r, 25));
+        if (errDist > 15) {
+            console.log(`   ↩️  correcting ${errDist.toFixed(0)}px`);
+            const cFrom = { x: this.currentPosition.x, y: this.currentPosition.y };
+            cFrom.x = Math.max(b.left + M, Math.min(b.right - M, cFrom.x));
+            cFrom.y = Math.max(b.top + M, Math.min(b.bottom - M, cFrom.y));
+            // Linear correction — no Bezier, just smooth straight line
+            const cSteps = Math.max(5, Math.round(errDist / 4));
+            let cLX = Math.round(cFrom.x), cLY = Math.round(cFrom.y);
+            for (let i = 1; i <= cSteps; i++) {
+                const t = i / cSteps;
+                const cx = Math.max(b.left + M, Math.min(b.right - M, Math.round(cFrom.x + (targetX - cFrom.x) * t)));
+                const cy = Math.max(b.top + M, Math.min(b.bottom - M, Math.round(cFrom.y + (targetY - cFrom.y) * t)));
+                let cdx = cx - cLX, cdy = cy - cLY;
+                if (cdx === 0 && cdy === 0) continue;
+                const cMax = Math.max(Math.abs(cdx), Math.abs(cdy));
+                if (cMax > MAX_STEP) {
+                    const subs = Math.ceil(cMax / MAX_STEP);
+                    for (let s = 1; s <= subs; s++) {
+                        const sdx = Math.round(cdx * s / subs) - Math.round(cdx * (s - 1) / subs);
+                        const sdy = Math.round(cdy * s / subs) - Math.round(cdy * (s - 1) / subs);
+                        if (sdx !== 0 || sdy !== 0) this.port.write(`MOVE,${sdx},${sdy}\r\n`);
+                        await new Promise(r => setTimeout(r, 3));
+                    }
+                } else {
+                    this.port.write(`MOVE,${cdx},${cdy}\r\n`);
                 }
+                cLX = cx; cLY = cy;
+                await new Promise(r => setTimeout(r, 3));
             }
-        } else {
-            console.log(`   ✅ within ${errDist.toFixed(1)}px`);
         }
 
         this.currentPosition = { x: targetX, y: targetY };
     }
 
-    async scrollToElement(selector, options = {}) {
-        // Feedback-loop scroll: send one burst, ask extension if element is in view, repeat.
-        // No calibration constants needed — the extension tells us the truth each time.
-        const MAX_ATTEMPTS = 15;
+    // Generate typing commands with ~8% human-like typos.
+    // Typo types:
+    //   - Single wrong char: type nearby/same-word letter, backspace, retype correct
+    //   - Swapped pair: type two chars in wrong order, backspace both, retype correct
+    generateTypingCommands(text) {
+        const cmds = [];
+        const ERROR_RATE = 0.08;
+        let i = 0;
+        while (i < text.length) {
+            if (Math.random() < ERROR_RATE && text[i] !== ' ' && text[i] !== '\n') {
+                // Decide: single wrong char or swapped pair
+                const canSwap = i + 1 < text.length && text[i + 1] !== ' ' && text[i + 1] !== '\n';
+                if (canSwap && Math.random() < 0.4) {
+                    // Swapped pair: type chars in wrong order, then fix
+                    cmds.push({ type: 'char', char: text[i + 1] });
+                    cmds.push({ type: 'char', char: text[i] });
+                    cmds.push({ type: 'pause', ms: 200 + Math.random() * 300 });
+                    cmds.push({ type: 'key', key: 'Backspace' });
+                    cmds.push({ type: 'pause', ms: 80 + Math.random() * 60 });
+                    cmds.push({ type: 'key', key: 'Backspace' });
+                    cmds.push({ type: 'pause', ms: 100 + Math.random() * 100 });
+                    cmds.push({ type: 'char', char: text[i] });
+                    cmds.push({ type: 'char', char: text[i + 1] });
+                    i += 2;
+                } else {
+                    // Single wrong char: pick a wrong letter, delete it, type correct
+                    const word = text.substring(Math.max(0, i - 3), Math.min(text.length, i + 4)).replace(/\s/g, '');
+                    let wrongChar;
+                    if (word.length > 1) {
+                        // Pick a different char from nearby in the word
+                        const candidates = word.split('').filter(c => c !== text[i] && c !== ' ');
+                        wrongChar = candidates.length > 0
+                            ? candidates[Math.floor(Math.random() * candidates.length)]
+                            : text[i]; // fallback: duplicate
+                    } else {
+                        wrongChar = text[i]; // duplicate the char
+                    }
+                    cmds.push({ type: 'char', char: wrongChar });
+                    cmds.push({ type: 'pause', ms: 150 + Math.random() * 350 });
+                    cmds.push({ type: 'key', key: 'Backspace' });
+                    cmds.push({ type: 'pause', ms: 80 + Math.random() * 80 });
+                    cmds.push({ type: 'char', char: text[i] });
+                    i++;
+                }
+            } else {
+                cmds.push({ type: 'char', char: text[i] });
+                i++;
+            }
+        }
+        return cmds;
+    }
 
+    async scrollToElement(selector, options = {}) {
         let coords = await this.getLiveCoords(selector, options);
         if (!coords.found || coords.inViewport) return coords;
 
-        let lastDirection = 1;
         let attempts = 0;
-
-        while (!coords.inViewport && attempts < MAX_ATTEMPTS) {
+        while (!coords.inViewport && attempts < 12) {
             if (this.emergencyStop) break;
 
-            const delta = coords.scrollDeltaNeeded || (coords.viewportTop < 0
-                ? coords.viewportTop
-                : coords.viewportTop - (coords.viewportH || 800));
-            lastDirection = delta > 0 ? 1 : -1;
-
-            const units = 120 + Math.floor(Math.random() * 51); // 120-170, same as randomScroll
-            console.log(`📜 Scroll ${attempts + 1}/${MAX_ATTEMPTS}: delta=${delta}px → ${lastDirection * units} units`);
-            await this.sendCommand(`SCROLL,${lastDirection * units}`);
-            await new Promise(r => setTimeout(r, 80 + Math.round(Math.random() * 80)));
+            const delta = coords.scrollDeltaNeeded || 0;
+            if (Math.abs(delta) < 50) {
+                console.log(`📜 close enough (delta=${delta}px), accepting`);
+                coords.inViewport = true;
+                break;
+            }
+            const dir = delta > 0 ? 1 : -1;
+            const units = dir * (4 + Math.floor(Math.random() * 5)); // 4-8
+            console.log(`📜 scroll: delta=${delta}px → ${units} units`);
+            await this.sendCommand(`SCROLL,${units}`);
+            await new Promise(r => setTimeout(r, 80 + Math.round(Math.random() * 40)));
 
             coords = await this.getLiveCoords(selector, options);
             if (!coords.found) break;
@@ -637,16 +697,10 @@ class ReadingBehaviorSimulator {
         }
 
         if (coords.inViewport) {
-            // Small overshoot + pullback for naturalness
-            const overshoot = 15 + Math.floor(Math.random() * 20);
-            await this.sendCommand(`SCROLL,${lastDirection * overshoot}`);
-            await new Promise(r => setTimeout(r, 60 + Math.round(Math.random() * 40)));
-            const pullback = 10 + Math.floor(Math.random() * 10);
-            await this.sendCommand(`SCROLL,${-lastDirection * pullback}`);
-            await new Promise(r => setTimeout(r, 60 + Math.round(Math.random() * 40)));
             console.log(`📜 In view after ${attempts} scroll(s)`);
+            coords = await this.getLiveCoords(selector, options);
         } else {
-            console.log(`📜 ⚠️  element still not in view after ${MAX_ATTEMPTS} attempts`);
+            console.log(`📜 ⚠️  element still not in view after scrolling`);
         }
 
         await new Promise(r => setTimeout(r, 150)); // settle
@@ -1130,13 +1184,20 @@ window.addEventListener('keydown', function(e) {
                             }
                         }
 
-                        // 5. Clear existing text and type new text
-                        // Select all first to replace any existing content
+                        // 5. Clear existing text and type with human-like typos
                         await this.sendCommand('COMBO,ctrl+a');
                         await new Promise(r => setTimeout(r, 100));
-                        for (const char of text) {
-                            await this.sendCommand(`TYPE,${char}`);
-                            await new Promise(resolve => setTimeout(resolve, 60 + Math.random() * 40));
+                        const typeCmds = this.generateTypingCommands(text);
+                        for (const cmd of typeCmds) {
+                            if (cmd.type === 'char') {
+                                await this.sendCommand(`TYPE,${cmd.char}`);
+                                await new Promise(r => setTimeout(r, 35 + Math.random() * 35));
+                            } else if (cmd.type === 'key') {
+                                await this.sendCommand(`KEY,${cmd.key}`);
+                                await new Promise(r => setTimeout(r, 30 + Math.random() * 30));
+                            } else if (cmd.type === 'pause') {
+                                await new Promise(r => setTimeout(r, cmd.ms));
+                            }
                         }
                         await new Promise(r => setTimeout(r, 200));
 
@@ -1242,116 +1303,122 @@ window.addEventListener('keydown', function(e) {
                     }
                 } catch (_) {} // if pre-check fails, proceed with normal retry loop
 
-                const MAX_RETRIES = 6;
+                const MAX_RETRIES = 20;
                 let confirmed = false;
                 for (let attempt = 0; attempt < MAX_RETRIES && !confirmed; attempt++) {
                     if (this.emergencyStop) break;
                     try {
                         // 1. Get live coords for this label within the container
                         let coords = await this.getLiveCoords(containerSelector, { labelText });
-                        if (!coords.found) throw new Error(`Label "${labelText}" not found in ${containerSelector}`);
+                        if (!coords.found) {
+                            console.log(`   ⚠️  label not found, waiting... (attempt ${attempt + 1})`);
+                            await new Promise(r => setTimeout(r, 500));
+                            continue;
+                        }
 
-                        // Quick check: if a previous attempt's click already worked
-                        // (e.g. click landed but verify failed due to re-render), we're done
-                        if (attempt > 0 && coords.checked === true) {
-                            console.log(`   ✅ already checked (previous click landed) — done`);
+                        // Quick check: if already checked (previous click or pre-existing), done
+                        if (coords.checked === true) {
+                            console.log(`   ✅ already checked — done`);
                             confirmed = true;
                             break;
                         }
 
-                        const prevChecked = coords.checked;
-
-                        // 2. Scroll into view — loop until confirmed in viewport
+                        // 2. Scroll into view if needed
                         if (!coords.inViewport) {
                             coords = await this.scrollToElement(containerSelector, { labelText });
-                            if (!coords.found) throw new Error('Element lost during scroll');
-                        }
-                        // Double-check it's in view
-                        coords = await this.getLiveCoords(containerSelector, { labelText });
-                        if (!coords.found) throw new Error('Element not found after scroll');
-                        if (!coords.inViewport) {
-                            console.log(`   ⚠️  still not in viewport (attempt ${attempt + 1})`);
-                            continue;
-                        }
-
-                        // 3. Move and click
-                        //    On retry attempts, nudge the mouse first to force a fresh
-                        //    mousemove event, then re-query for accurate cursor position
-                        if (attempt > 0) {
-                            console.log(`   🔄 nudging mouse to refresh cursor tracking...`);
-                            const nudge = 5 + Math.floor(Math.random() * 10);
-                            await this.sendCommand(`MOVE,${nudge},${nudge}`);
-                            await new Promise(r => setTimeout(r, 200));
-                            // Re-query with fresh cursor position
-                            coords = await this.getLiveCoords(containerSelector, { labelText });
-                            if (!coords.found || !coords.inViewport) {
-                                console.log(`   ⚠️  lost element after nudge (attempt ${attempt + 1})`);
+                            if (!coords.found) {
+                                console.log(`   ⚠️  lost element during scroll (attempt ${attempt + 1})`);
+                                await new Promise(r => setTimeout(r, 300));
                                 continue;
                             }
                         }
-                        // Sync from extension's cursor report
+                        // Confirm in view
+                        coords = await this.getLiveCoords(containerSelector, { labelText });
+                        if (!coords.found || !coords.inViewport) {
+                            console.log(`   ⚠️  not in viewport (attempt ${attempt + 1})`);
+                            continue;
+                        }
+
+                        // 3. On retries, nudge to refresh cursor tracking
+                        if (attempt > 0) {
+                            const nudge = 5 + Math.floor(Math.random() * 10);
+                            await this.sendCommand(`MOVE,${nudge},${nudge}`);
+                            await new Promise(r => setTimeout(r, 150));
+                            coords = await this.getLiveCoords(containerSelector, { labelText });
+                            if (!coords.found || !coords.inViewport) continue;
+                            // Check if previous click actually worked
+                            if (coords.checked === true) {
+                                console.log(`   ✅ previous click landed — done`);
+                                confirmed = true;
+                                break;
+                            }
+                        }
+
+                        // 4. Sync cursor position and move to target
                         if (typeof coords.cursorX === 'number' && coords.cursorX > 0) {
                             this.currentPosition = { x: coords.cursorX, y: coords.cursorY };
                         }
-                        // On retries, add small jitter so we don't keep missing the same edge
                         let targetX = coords.x;
                         let targetY = coords.y;
                         if (attempt > 0) {
-                            const jitterX = Math.round((Math.random() - 0.5) * 8);
-                            const jitterY = Math.round((Math.random() - 0.5) * 8);
+                            const jitterX = Math.round((Math.random() - 0.5) * 10);
+                            const jitterY = Math.round((Math.random() - 0.5) * 10);
                             targetX += jitterX;
                             targetY += jitterY;
-                            console.log(`   🎯 jitter: (${jitterX}, ${jitterY})`);
                         }
                         const dx = Math.round(targetX - this.currentPosition.x);
                         const dy = Math.round(targetY - this.currentPosition.y);
                         console.log(`   → target=(${Math.round(targetX)}, ${Math.round(targetY)}) cursor=(${Math.round(this.currentPosition.x)}, ${Math.round(this.currentPosition.y)}) delta=(${dx}, ${dy}) [attempt ${attempt + 1}]`);
                         await this.moveToAbs(targetX, targetY, null, { noOvershoot: true });
-                        await this.sendCommand('CLICK');
-                        await new Promise(r => setTimeout(r, 500)); // 500ms settle for React re-render
 
-                        // 4. Verify state changed — retry querySelector a few times
-                        //    because React may briefly unmount/remount the element
+                        // 5. Hover-verify: MUST confirm correct label before clicking
+                        await new Promise(r => setTimeout(r, 100));
+                        const hoverCheck = await this.getLiveCoords(containerSelector, { labelText });
+                        const hovering = (hoverCheck.hoveredLabelText || '').toLowerCase();
+                        const want = labelText.trim().toLowerCase();
+                        if (!hovering.includes(want)) {
+                            if (hovering) {
+                                console.log(`   ⚠️  hovering "${hoverCheck.hoveredLabelText}" not "${labelText}" — adjusting`);
+                            } else {
+                                console.log(`   ⚠️  no hover detected — adjusting`);
+                            }
+                            continue;
+                        }
+                        console.log(`   👆 hover confirmed: "${labelText}"`);
+
+                        // 6. Click
+                        await this.sendCommand('CLICK');
+                        await new Promise(r => setTimeout(r, 500));
+
+                        // 7. Verify state — retry a few times for React re-render
                         let check = null;
                         for (let v = 0; v < 4; v++) {
                             check = await this.getLiveCoords(containerSelector, { labelText });
                             if (check.found) break;
-                            console.log(`   ⏳ verify: element not found yet, waiting... (${v + 1}/4)`);
+                            console.log(`   ⏳ verify: waiting for DOM... (${v + 1}/4)`);
                             await new Promise(r => setTimeout(r, 400));
                         }
                         if (!check || !check.found) {
-                            console.log(`   ⚠️  element gone after click — DOM re-render? (attempt ${attempt + 1})`);
+                            console.log(`   ⚠️  element gone after click (attempt ${attempt + 1})`);
                             continue;
                         }
 
-                        if (check.checked !== null) {
-                            // Radio/checkbox — checked state should have changed
-                            if (check.checked === true) {
-                                console.log(`   ✅ confirmed checked`);
-                                confirmed = true;
-                            } else if (check.checked === prevChecked) {
-                                console.log(`   ⚠️  state unchanged (still ${check.checked}) — retrying (attempt ${attempt + 1})`);
-                                // Try clicking with slightly offset coords in case we missed
-                                await new Promise(r => setTimeout(r, 200));
-                            } else {
-                                console.log(`   ✅ state changed → ${check.checked}`);
-                                confirmed = true;
-                            }
-                        } else {
-                            // No checked state to verify (might be a custom element)
-                            console.log(`   ✅ clicked (no checked state to verify)`);
+                        if (check.checked === true) {
+                            console.log(`   ✅ confirmed checked`);
                             confirmed = true;
+                        } else {
+                            console.log(`   ⚠️  state unchanged — retrying (attempt ${attempt + 1})`);
+                            await new Promise(r => setTimeout(r, 200));
                         }
                     } catch (err) {
-                        console.error(`   ❌ CLICK_OPTION attempt ${attempt + 1} failed: ${err.message}`);
+                        console.error(`   ❌ attempt ${attempt + 1}: ${err.message}`);
                         await new Promise(r => setTimeout(r, 500));
                     }
                 }
                 if (!confirmed) {
                     console.error(`   ❌ CLICK_OPTION FAILED after ${MAX_RETRIES} attempts: "${containerSelector}" → "${labelText}"`);
-                    console.error(`   🛑 HALTING automation — cannot proceed with unverified state`);
-                    this.isAutomating = false;
-                    return; // STOP — do not advance to next command
+                    console.error(`   🛑 HALTING — every answer must be filled`);
+                    return; // Stop automation entirely
                 }
 
             } else {
