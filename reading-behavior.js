@@ -484,7 +484,7 @@ class ReadingBehaviorSimulator {
     // Extension gives us exact target + cursor coords. Step linearly toward
     // the target in small increments to stay below OS pointer acceleration.
     // Clamps target to viewport bounds so the cursor never leaves the page.
-    async moveToAbs(targetX, targetY, startPos = null) {
+    async moveToAbs(targetX, targetY, startPos = null, opts = {}) {
         // Clamp target to viewport bounds (never click dock/menubar/off-page)
         if (this.viewportBounds) {
             const b = this.viewportBounds;
@@ -527,7 +527,8 @@ class ReadingBehaviorSimulator {
         }
 
         // Overshoot: move a few px past target in the direction of travel, then pull back
-        const overshootMag = (dist > 20) ? (5 + Math.random() * 14) : 0;
+        // Disabled when noOvershoot is set (for precision automation clicks)
+        const overshootMag = (!opts.noOvershoot && dist > 20) ? (5 + Math.random() * 14) : 0;
         const len = Math.max(dist, 1);
         let overshootX = Math.round(targetX + (dx / len) * overshootMag);
         let overshootY = Math.round(targetY + (dy / len) * overshootMag);
@@ -1250,6 +1251,14 @@ window.addEventListener('keydown', function(e) {
                         let coords = await this.getLiveCoords(containerSelector, { labelText });
                         if (!coords.found) throw new Error(`Label "${labelText}" not found in ${containerSelector}`);
 
+                        // Quick check: if a previous attempt's click already worked
+                        // (e.g. click landed but verify failed due to re-render), we're done
+                        if (attempt > 0 && coords.checked === true) {
+                            console.log(`   ✅ already checked (previous click landed) — done`);
+                            confirmed = true;
+                            break;
+                        }
+
                         const prevChecked = coords.checked;
 
                         // 2. Scroll into view — loop until confirmed in viewport
@@ -1266,17 +1275,52 @@ window.addEventListener('keydown', function(e) {
                         }
 
                         // 3. Move and click
-                        const cursorStart = (typeof coords.cursorX === 'number') ? { x: coords.cursorX, y: coords.cursorY } : null;
-                        console.log(`   → move to (${Math.round(coords.x)}, ${Math.round(coords.y)}) [attempt ${attempt + 1}]`);
-                        await this.moveToAbs(coords.x, coords.y, cursorStart);
+                        //    On retry attempts, nudge the mouse first to force a fresh
+                        //    mousemove event, then re-query for accurate cursor position
+                        if (attempt > 0) {
+                            console.log(`   🔄 nudging mouse to refresh cursor tracking...`);
+                            const nudge = 5 + Math.floor(Math.random() * 10);
+                            await this.sendCommand(`MOVE,${nudge},${nudge}`);
+                            await new Promise(r => setTimeout(r, 200));
+                            // Re-query with fresh cursor position
+                            coords = await this.getLiveCoords(containerSelector, { labelText });
+                            if (!coords.found || !coords.inViewport) {
+                                console.log(`   ⚠️  lost element after nudge (attempt ${attempt + 1})`);
+                                continue;
+                            }
+                        }
+                        // Sync from extension's cursor report
+                        if (typeof coords.cursorX === 'number' && coords.cursorX > 0) {
+                            this.currentPosition = { x: coords.cursorX, y: coords.cursorY };
+                        }
+                        // On retries, add small jitter so we don't keep missing the same edge
+                        let targetX = coords.x;
+                        let targetY = coords.y;
+                        if (attempt > 0) {
+                            const jitterX = Math.round((Math.random() - 0.5) * 8);
+                            const jitterY = Math.round((Math.random() - 0.5) * 8);
+                            targetX += jitterX;
+                            targetY += jitterY;
+                            console.log(`   🎯 jitter: (${jitterX}, ${jitterY})`);
+                        }
+                        const dx = Math.round(targetX - this.currentPosition.x);
+                        const dy = Math.round(targetY - this.currentPosition.y);
+                        console.log(`   → target=(${Math.round(targetX)}, ${Math.round(targetY)}) cursor=(${Math.round(this.currentPosition.x)}, ${Math.round(this.currentPosition.y)}) delta=(${dx}, ${dy}) [attempt ${attempt + 1}]`);
+                        await this.moveToAbs(targetX, targetY, null, { noOvershoot: true });
                         await this.sendCommand('CLICK');
                         await new Promise(r => setTimeout(r, 500)); // 500ms settle for React re-render
 
-                        // 4. Verify state changed
-                        const check = await this.getLiveCoords(containerSelector, { labelText });
-                        if (!check.found) {
-                            console.log(`   ⚠️  element not found for verify — DOM may be re-rendering (attempt ${attempt + 1})`);
-                            await new Promise(r => setTimeout(r, 500)); // extra wait for DOM settle
+                        // 4. Verify state changed — retry querySelector a few times
+                        //    because React may briefly unmount/remount the element
+                        let check = null;
+                        for (let v = 0; v < 4; v++) {
+                            check = await this.getLiveCoords(containerSelector, { labelText });
+                            if (check.found) break;
+                            console.log(`   ⏳ verify: element not found yet, waiting... (${v + 1}/4)`);
+                            await new Promise(r => setTimeout(r, 400));
+                        }
+                        if (!check || !check.found) {
+                            console.log(`   ⚠️  element gone after click — DOM re-render? (attempt ${attempt + 1})`);
                             continue;
                         }
 

@@ -244,6 +244,10 @@ function pollForCoordRequests() {
         const chromeOffset = window.outerHeight - window.innerHeight;
         const vH = window.innerHeight;
         const inViewport = rect.top >= 0 && rect.bottom <= vH && rect.width > 0;
+
+        const absX = windowX + Math.round(rect.left + rect.width / 2);
+        const absY = windowY + Math.round(rect.top + rect.height / 2) + chromeOffset;
+        console.log(`📍 coord-response: sel="${data.selector?.substring(0,30)}" label="${data.labelText||''}" → clickTarget=${clickTarget.tagName} rect=(${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)}x${Math.round(rect.height)}) abs=(${absX},${absY}) cursor=(${liveCursorX},${liveCursorY}) checked=${el.checked} inView=${inViewport} winPos=(${windowX},${windowY}) chrome=${chromeOffset}`);
         // Exact pixel delta that scrollIntoView({block:'center'}) would scroll
         const elementAbsTop = rect.top + window.scrollY;
         const targetScrollY = elementAbsTop + rect.height / 2 - vH / 2;
@@ -469,7 +473,7 @@ setInterval(pollForScanRequests, 500);
   const qDivs = document.querySelectorAll('div[data-question-id]');
   qDivs.forEach(qdiv => {
     const uuid = qdiv.getAttribute('data-question-id');
-    const label = qdiv.getAttribute('data-label') || '?';
+    const label = qdiv.getAttribute('data-label') || qdiv.id || uuid.substring(0, 8);
     qdiv.querySelectorAll('input[type="radio"], input[type="checkbox"]').forEach(input => {
       input.addEventListener('change', () => {
         const lbl = input.closest('label');
