@@ -510,29 +510,9 @@ class ReadingBehaviorSimulator {
         console.log(`🖱️  move: (${Math.round(from.x)},${Math.round(from.y)}) → (${targetX},${targetY})  dist=${Math.round(dist)}px`);
         if (dist < 3) { this.currentPosition = { x: targetX, y: targetY }; return; }
 
-        let points;
-        if (dist < 80) {
-            // Short distance: mostly straight with tiny random drift
-            const steps = Math.max(8, Math.round(dist / 3));
-            points = [];
-            // Pick a small random perpendicular offset (1-3px) for subtle curve
-            const perpAmt = (1 + Math.random() * 2) * (Math.random() > 0.5 ? 1 : -1);
-            const dx = targetX - from.x, dy = targetY - from.y;
-            const perpX = -dy / dist, perpY = dx / dist; // unit perpendicular
-            for (let i = 0; i <= steps; i++) {
-                const t = i / steps;
-                // Parabolic bulge: peaks at t=0.5
-                const bulge = perpAmt * 4 * t * (1 - t);
-                points.push({
-                    x: from.x + dx * t + perpX * bulge,
-                    y: from.y + dy * t + perpY * bulge
-                });
-            }
-        } else {
-            // Long distance: ghost-cursor with very subtle arc
-            const spread = Math.min(dist * 0.01, 8);
-            points = ghostPath(from, { x: targetX, y: targetY }, { spreadOverride: spread });
-        }
+        // Generate path with gentle arc
+        const spread = Math.min(dist * 0.03, 20);
+        const points = ghostPath(from, { x: targetX, y: targetY }, { spreadOverride: spread });
 
         // Clamp every point to stay inside Chrome
         for (const p of points) {
@@ -540,80 +520,41 @@ class ReadingBehaviorSimulator {
             p.y = Math.max(b.top + M, Math.min(b.bottom - M, p.y));
         }
 
-        // Send relative moves — break into small steps to avoid pointer acceleration
-        // Each MOVE delta must stay under ~8px per axis to minimize macOS acceleration
-        const MAX_STEP = 8;
-        const skip = dist > 300 ? 3 : dist > 100 ? 2 : 1;
+        // Send relative moves — no sub-stepping needed with acceleration off
+        const skip = dist > 300 ? 3 : dist > 150 ? 2 : 1;
         let lastX = Math.round(from.x);
         let lastY = Math.round(from.y);
 
         for (let i = skip; i < points.length; i += skip) {
             if (this.emergencyStop) break;
-            const px = Math.max(b.left + M, Math.min(b.right - M, Math.round(points[i].x)));
-            const py = Math.max(b.top + M, Math.min(b.bottom - M, Math.round(points[i].y)));
-            let dx = px - lastX;
-            let dy = py - lastY;
-            if (dx === 0 && dy === 0) continue;
-
-            // If delta is too big, break into sub-steps
-            const maxAbs = Math.max(Math.abs(dx), Math.abs(dy));
-            if (maxAbs > MAX_STEP) {
-                const subs = Math.ceil(maxAbs / MAX_STEP);
-                for (let s = 1; s <= subs; s++) {
-                    const sdx = Math.round(dx * s / subs) - Math.round(dx * (s - 1) / subs);
-                    const sdy = Math.round(dy * s / subs) - Math.round(dy * (s - 1) / subs);
-                    if (sdx !== 0 || sdy !== 0) this.port.write(`MOVE,${sdx},${sdy}\r\n`);
-                    await new Promise(r => setTimeout(r, 3));
-                }
-            } else {
+            const px = Math.round(points[i].x);
+            const py = Math.round(points[i].y);
+            const dx = px - lastX;
+            const dy = py - lastY;
+            if (dx !== 0 || dy !== 0) {
                 this.port.write(`MOVE,${dx},${dy}\r\n`);
+                lastX = px;
+                lastY = py;
             }
-            lastX = px;
-            lastY = py;
-            await new Promise(r => setTimeout(r, 3 + Math.round(Math.random() * 2)));
+            await new Promise(r => setTimeout(r, 4 + Math.round(Math.random() * 6)));
         }
 
         // Land on final point
         const fp = points[points.length - 1];
-        const fdx = Math.round(Math.max(b.left + M, Math.min(b.right - M, fp.x))) - lastX;
-        const fdy = Math.round(Math.max(b.top + M, Math.min(b.bottom - M, fp.y))) - lastY;
+        const fdx = Math.round(fp.x) - lastX;
+        const fdy = Math.round(fp.y) - lastY;
         if (fdx !== 0 || fdy !== 0) this.port.write(`MOVE,${fdx},${fdy}\r\n`);
 
-        await new Promise(r => setTimeout(r, 80));
+        await new Promise(r => setTimeout(r, 60));
 
-        // If drifted, do ONE ghost-cursor correction move — not tiny increments
+        // Single correction if drifted — just one MOVE, no path
         const errX = targetX - this.currentPosition.x;
         const errY = targetY - this.currentPosition.y;
         const errDist = Math.sqrt(errX * errX + errY * errY);
-        if (errDist > 15) {
+        if (errDist > 10) {
             console.log(`   ↩️  correcting ${errDist.toFixed(0)}px`);
-            const cFrom = { x: this.currentPosition.x, y: this.currentPosition.y };
-            cFrom.x = Math.max(b.left + M, Math.min(b.right - M, cFrom.x));
-            cFrom.y = Math.max(b.top + M, Math.min(b.bottom - M, cFrom.y));
-            // Linear correction — no Bezier, just smooth straight line
-            const cSteps = Math.max(5, Math.round(errDist / 4));
-            let cLX = Math.round(cFrom.x), cLY = Math.round(cFrom.y);
-            for (let i = 1; i <= cSteps; i++) {
-                const t = i / cSteps;
-                const cx = Math.max(b.left + M, Math.min(b.right - M, Math.round(cFrom.x + (targetX - cFrom.x) * t)));
-                const cy = Math.max(b.top + M, Math.min(b.bottom - M, Math.round(cFrom.y + (targetY - cFrom.y) * t)));
-                let cdx = cx - cLX, cdy = cy - cLY;
-                if (cdx === 0 && cdy === 0) continue;
-                const cMax = Math.max(Math.abs(cdx), Math.abs(cdy));
-                if (cMax > MAX_STEP) {
-                    const subs = Math.ceil(cMax / MAX_STEP);
-                    for (let s = 1; s <= subs; s++) {
-                        const sdx = Math.round(cdx * s / subs) - Math.round(cdx * (s - 1) / subs);
-                        const sdy = Math.round(cdy * s / subs) - Math.round(cdy * (s - 1) / subs);
-                        if (sdx !== 0 || sdy !== 0) this.port.write(`MOVE,${sdx},${sdy}\r\n`);
-                        await new Promise(r => setTimeout(r, 3));
-                    }
-                } else {
-                    this.port.write(`MOVE,${cdx},${cdy}\r\n`);
-                }
-                cLX = cx; cLY = cy;
-                await new Promise(r => setTimeout(r, 3));
-            }
+            this.port.write(`MOVE,${Math.round(errX)},${Math.round(errY)}\r\n`);
+            await new Promise(r => setTimeout(r, 30));
         }
 
         this.currentPosition = { x: targetX, y: targetY };
